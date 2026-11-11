@@ -1,0 +1,2652 @@
+import React, { useMemo, useState } from 'react';
+import {
+  AlertTriangle,
+  Award,
+  CheckCircle2,
+  Compass,
+  FileCheck2,
+  Globe,
+  Lock,
+  Mountain,
+  Scale,
+  Search,
+  Shield,
+  ShieldAlert,
+  ShieldCheck,
+  Sparkles,
+  Upload,
+  UserCheck,
+  XCircle,
+} from 'lucide-react';
+import { Badge3DViewer } from './components/Badge3DViewer';
+import { DESTINATIONS_100_CATALOG } from './data/destinations100';
+import {
+  evaluateRbacPermission,
+  INITIAL_AUDIT_EVENTS,
+  INITIAL_SUBMISSIONS_QUEUE,
+  INITIAL_VERIFIED_CERTIFICATES,
+  MASTER_21_PHASES,
+  ResourceDomain,
+} from './data/governanceAndPhases';
+import {
+  computeDeterministicHmacDigest,
+  DEMO_ACTOR_PROFILES,
+  evaluateContextualTelemetry,
+  generateNonEnumerableVerificationId,
+  runAutomatedFiveSignalCoiCheck,
+} from './domain/verificationEngine';
+import {
+  AchievementSubmission,
+  ActionVerb,
+  AppendOnlyAuditEvent,
+  DestinationRecord,
+  PublicCertificateRecord,
+  ResearchStage,
+  UserRole,
+  VerificationTrack,
+  WorldRegion,
+} from './types/platform';
+
+const HERO_EVEREST_IMG = '/src/assets/images/everest_himalaya_hero_1794391532629.jpg';
+const CARD_AMADABLAM_IMG = '/src/assets/images/ama_dablam_expedition_1794391533361.jpg';
+const CARD_ANNAPURNA_IMG = '/src/assets/images/annapurna_thorong_pass_1794391535524.jpg';
+const CARD_KILIMANJARO_IMG = '/src/assets/images/kilimanjaro_uhuru_glacier_1794391535358.jpg';
+
+type ActiveSection =
+  | 'DESTINATIONS'
+  | 'SUBMIT_PROVE'
+  | 'VERIFICATION_APPEALS'
+  | 'CERTIFICATES_STANDINGS'
+  | 'GOVERNANCE_PHASES';
+
+export default function App() {
+  // Navigation & Global Workspace Preferences
+  const [activeSection, setActiveSection] = useState<ActiveSection>('DESTINATIONS');
+  const [lang, setLang] = useState<'EN' | 'NE'>('EN');
+  const [unitSystem, setUnitSystem] = useState<'METRIC' | 'IMPERIAL'>('METRIC');
+  const [activeActorKey, setActiveActorKey] = useState<string>('actor-reviewer-independent-219');
+
+  // Stateful Catalog, Submissions, Certificates & Append-Only Audit Ledger
+  const [destinations, setDestinations] = useState<DestinationRecord[]>(DESTINATIONS_100_CATALOG);
+  const [submissions, setSubmissions] = useState<AchievementSubmission[]>(INITIAL_SUBMISSIONS_QUEUE);
+  const [certificates, setCertificates] = useState<PublicCertificateRecord[]>(
+    INITIAL_VERIFIED_CERTIFICATES
+  );
+  const [auditEvents, setAuditEvents] = useState<AppendOnlyAuditEvent[]>(INITIAL_AUDIT_EVENTS);
+
+  // Destination Explorer Filters
+  const [selectedRegion, setSelectedRegion] = useState<WorldRegion | 'ALL' | 'NEPAL_ANCHOR'>('ALL');
+  const [selectedStage, setSelectedStage] = useState<ResearchStage | 'ALL'>('ALL');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [selectedDestinationId, setSelectedDestinationId] = useState<string>('dest-001');
+
+  // Submission Lab State
+  const [subDestId, setSubDestId] = useState<string>('dest-009');
+  const [subTrack, setSubTrack] = useState<VerificationTrack>('STANDARD_DIGITAL');
+  const [subHolderName, setSubHolderName] = useState<string>('Tashi Lhamu Sherpa');
+  const [subNationality, setSubNationality] = useState<string>('Nepal (NP)');
+  const [subCompletionDate, setSubCompletionDate] = useState<string>('2026-11-04');
+  const [subMaxElevM, setSubMaxElevM] = useState<number>(6810.5);
+  const [subApexDistM, setSubApexDistM] = useState<number>(8.2);
+  const [subAscentRate, setSubAscentRate] = useState<number>(280);
+  const [subHasBaro, setSubHasBaro] = useState<boolean>(true);
+  const [subPermitRef, setSubPermitRef] = useState<string>('DOT-NP-AMD-2026-8841');
+  const [subIdentityConsent, setSubIdentityConsent] = useState<
+    'FULL_VERIFIED_NAME' | 'DISPLAY_HANDLE_OR_INITIALS' | 'PRIVATE_CREDENTIAL_HOLDER'
+  >('FULL_VERIFIED_NAME');
+  const [subDatePrecision, setSubDatePrecision] = useState<
+    'EXACT_DATE' | 'MONTH_AND_YEAR_ONLY' | 'YEAR_ONLY'
+  >('EXACT_DATE');
+  const [subLeaderboardOptIn, setSubLeaderboardOptIn] = useState<boolean>(true);
+  const [subTruthDeclaration, setSubTruthDeclaration] = useState<boolean>(true);
+  const [subNarrative, setSubNarrative] = useState<string>(
+    'Completed Southwest Ridge ascent from Camp II across Mushroom Ridge to main summit snow dome. Continuous multi-band GNSS + barometric altimeter telemetry and original EXIF summit photographs attached.'
+  );
+  const [submissionFeedback, setSubmissionFeedback] = useState<string | null>(null);
+
+  // Verification Workstation & Appeal Tribunal State
+  const [selectedSubmissionId, setSelectedSubmissionId] = useState<string>('sub-queue-101');
+  const [coiAttestedByOfficer, setCoiAttestedByOfficer] = useState<boolean>(false);
+  const [reviewRationaleInput, setReviewRationaleInput] = useState<string>(
+    'Corroborated multi-band GNSS + barometric altitude profile against official route geofence, verified raw EXIF solar geometry, and confirmed official climbing permit.'
+  );
+  const [workstationBanner, setWorkstationBanner] = useState<{
+    type: 'SUCCESS' | 'ERROR' | 'INFO';
+    text: string;
+  } | null>(null);
+  const [aiBriefText, setAiBriefText] = useState<string | null>(null);
+  const [aiBriefLoading, setAiBriefLoading] = useState<boolean>(false);
+
+  // Public Certificate Verifier & Leaderboard State
+  const [verifyLookupId, setVerifyLookupId] = useState<string>('8848-V1-9K4M-7P2X-Q8R5-3N6W');
+  const [leaderboardMetric, setLeaderboardMetric] = useState<
+    'ELEVATION_SUM' | 'VERIFIED_COUNT' | 'HIGHEST_APEX'
+  >('ELEVATION_SUM');
+
+  // Governance & RBAC Tester State
+  const [testRole, setTestRole] = useState<UserRole>('VERIFICATION_OFFICER');
+  const [testResource, setTestResource] = useState<ResourceDomain>('VERIFICATION_DECISIONS');
+  const [testVerb, setTestVerb] = useState<ActionVerb>('APPROVE');
+  const [gateTestMessage, setGateTestMessage] = useState<string | null>(null);
+
+  const activeActor = DEMO_ACTOR_PROFILES[activeActorKey] || DEMO_ACTOR_PROFILES['actor-reviewer-independent-219'];
+
+  // Helper to append an immutable audit event with sequential HMAC chaining
+  const appendAuditEvent = (
+    actorRole: UserRole,
+    actorUuid: string,
+    actionType: string,
+    targetEntityType: string,
+    targetEntityId: string,
+    summary: string
+  ) => {
+    setAuditEvents((prev) => {
+      const last = prev[prev.length - 1];
+      const nextSeq = last ? last.sequenceNumber + 1 : 1;
+      const prevHmac = last ? last.currentEventHmac : 'GENESIS_0000';
+      const nowUtc = new Date().toISOString();
+      const currentHmac = computeDeterministicHmacDigest(
+        `${nextSeq}|${nowUtc}|${actorUuid}|${actionType}|${targetEntityId}|${summary}`,
+        prevHmac
+      );
+      const newEvt: AppendOnlyAuditEvent = {
+        sequenceNumber: nextSeq,
+        eventId: `AUD-8848-${String(nextSeq).padStart(4, '0')}`,
+        timestampUtc: nowUtc,
+        actorInternalUuid: actorUuid,
+        actorRole,
+        actionType,
+        targetEntityType,
+        targetEntityId,
+        summary,
+        previousEventHmac: prevHmac,
+        currentEventHmac: currentHmac,
+        wormReplicated: true,
+      };
+      return [newEvt, ...prev];
+    });
+  };
+
+  // Format elevation helper
+  const formatElev = (m: number) => {
+    if (unitSystem === 'METRIC') {
+      return `${m.toLocaleString()} m`;
+    }
+    return `${Math.round(m * 3.28084).toLocaleString()} ft`;
+  };
+
+  // Filtered 100 Destinations
+  const filteredDestinations = useMemo(() => {
+    return destinations.filter((d) => {
+      if (selectedRegion === 'NEPAL_ANCHOR' && !d.isNepalOriginAnchor) return false;
+      if (selectedRegion !== 'ALL' && selectedRegion !== 'NEPAL_ANCHOR' && d.region !== selectedRegion)
+        return false;
+      if (selectedStage !== 'ALL' && d.researchStage !== selectedStage) return false;
+      if (searchQuery.trim() !== '') {
+        const q = searchQuery.toLowerCase();
+        const matchName = d.officialNameEn.toLowerCase().includes(q);
+        const matchCode = d.code.toLowerCase().includes(q);
+        const matchCountry = d.countryNames.toLowerCase().includes(q);
+        const matchRoute = d.canonicalRouteName.toLowerCase().includes(q);
+        if (!matchName && !matchCode && !matchCountry && !matchRoute) return false;
+      }
+      return true;
+    });
+  }, [destinations, selectedRegion, selectedStage, searchQuery]);
+
+  const selectedDestination = useMemo(
+    () => destinations.find((d) => d.id === selectedDestinationId) || destinations[0],
+    [destinations, selectedDestinationId]
+  );
+
+  const publishedDestinations = useMemo(
+    () => destinations.filter((d) => d.researchStage === '5_PUBLISHED'),
+    [destinations]
+  );
+
+  const submissionTargetDestination = useMemo(
+    () => publishedDestinations.find((d) => d.id === subDestId) || publishedDestinations[0],
+    [publishedDestinations, subDestId]
+  );
+
+  const liveTelemetryPreview = useMemo(
+    () =>
+      evaluateContextualTelemetry(
+        submissionTargetDestination,
+        subMaxElevM,
+        subApexDistM,
+        subAscentRate,
+        subHasBaro
+      ),
+    [submissionTargetDestination, subMaxElevM, subApexDistM, subAscentRate, subHasBaro]
+  );
+
+  const selectedSubmission = useMemo(
+    () => submissions.find((s) => s.id === selectedSubmissionId) || submissions[0],
+    [submissions, selectedSubmissionId]
+  );
+
+  const activeCoiResult = useMemo(
+    () =>
+      runAutomatedFiveSignalCoiCheck(
+        activeActor,
+        selectedSubmission,
+        selectedSubmission.status === 'APPEALED'
+      ),
+    [activeActor, selectedSubmission]
+  );
+
+  const lookedUpCertificate = useMemo(
+    () =>
+      certificates.find(
+        (c) => c.verificationId.toLowerCase() === verifyLookupId.trim().toLowerCase()
+      ),
+    [certificates, verifyLookupId]
+  );
+
+  // Advance Destination Research Stage handler (enforces Researcher Stages 1-3 vs Governance Dual-Control Stages 4-5)
+  const handleAdvanceDestinationStage = (dest: DestinationRecord) => {
+    const stageOrder: ResearchStage[] = [
+      '1_PROPOSED',
+      '2_UNDER_RESEARCH',
+      '3_RESEARCH_COMPLETED',
+      '4_REVIEWED_AND_APPROVED',
+      '5_PUBLISHED',
+    ];
+    const currentIndex = stageOrder.indexOf(dest.researchStage);
+    if (currentIndex >= stageOrder.length - 1) return;
+    const nextStage = stageOrder[currentIndex + 1];
+
+    // Enforce Governance Dual-Control for Stages 4 and 5
+    if (
+      (nextStage === '4_REVIEWED_AND_APPROVED' || nextStage === '5_PUBLISHED') &&
+      activeActor.role !== 'FOUNDER' &&
+      activeActor.role !== 'GOVERNANCE_COMMITTEE'
+    ) {
+      setWorkstationBanner({
+        type: 'ERROR',
+        text: `RBAC & Governance Gate Blocked: Role (${activeActor.role}) cannot advance ${dest.code} to ${nextStage}. Only Dual-Control Founder / Governance Committee authority can approve Stage 4 & Stage 5 publication.`,
+      });
+      appendAuditEvent(
+        activeActor.role,
+        activeActor.userId,
+        'UNAUTHORIZED_STAGE_ADVANCE_BLOCKED',
+        'DESTINATION_RECORD',
+        dest.code,
+        `Blocked attempt by ${activeActor.officerCode} to transition ${dest.code} to ${nextStage} without Governance Dual-Control authority.`
+      );
+      return;
+    }
+
+    setDestinations((prev) =>
+      prev.map((d) =>
+        d.id === dest.id
+          ? {
+              ...d,
+              researchStage: nextStage,
+              elevationCitationVerified:
+                nextStage === '4_REVIEWED_AND_APPROVED' || nextStage === '5_PUBLISHED',
+              publicationStatus: nextStage === '5_PUBLISHED' ? 'PUBLISHED' : 'UNPUBLISHED_DRAFT',
+            }
+          : d
+      )
+    );
+
+    appendAuditEvent(
+      activeActor.role,
+      activeActor.userId,
+      'DESTINATION_RESEARCH_STAGE_ADVANCED',
+      'DESTINATION_RECORD',
+      dest.code,
+      `Transitioned ${dest.officialNameEn} (${dest.code}) from ${dest.researchStage} to ${nextStage}.`
+    );
+  };
+
+  // Submit New Achievement Application
+  const handleCreateSubmission = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!subTruthDeclaration) {
+      setSubmissionFeedback(
+        'Mandatory Requirement: You must sign the Truthfulness & Anti-Fraud Declaration before submitting.'
+      );
+      return;
+    }
+
+    const newSeq = submissions.length + 101;
+    const subCode = `SUB-2026-8848-${newSeq}`;
+    const gpxDigest = computeDeterministicHmacDigest(
+      `${subCode}|${subDestId}|${subMaxElevM}|${subCompletionDate}`,
+      'SHA256_UPLOAD_SALT'
+    ).replace('hmac256:', '');
+
+    const initials = subHolderName
+      .split(' ')
+      .map((n) => `${n[0]}.`)
+      .join(' ');
+
+    const newSub: AchievementSubmission = {
+      id: `sub-queue-${newSeq}`,
+      submissionCode: subCode,
+      applicantUserId: `usr-applicant-${newSeq}`,
+      applicantDisplayName: subHolderName,
+      applicantInitials: initials,
+      applicantNationality: subNationality,
+      destinationId: submissionTargetDestination.id,
+      destinationName: submissionTargetDestination.officialNameEn,
+      destinationElevationM: submissionTargetDestination.elevationM,
+      destinationTier: submissionTargetDestination.tier,
+      routeName: submissionTargetDestination.canonicalRouteName,
+      verificationTrack: subTrack,
+      completionDateUtc: `${subCompletionDate}T06:30:00Z`,
+      applicantStory: subNarrative,
+      truthfulnessDeclarationSigned: true,
+      privacyConsent: {
+        publicIdentityMode: subIdentityConsent,
+        publicDatePrecision: subDatePrecision,
+        optInPublicLeaderboards: subLeaderboardOptIn,
+      },
+      evidenceArtifacts: [
+        {
+          id: `art-${newSeq}-gpx`,
+          type:
+            subTrack === 'STANDARD_DIGITAL'
+              ? 'GPX_TELEMETRY'
+              : 'MINISTRY_LEGACY_CERTIFICATE',
+          fileName:
+            subTrack === 'STANDARD_DIGITAL'
+              ? `${submissionTargetDestination.code.toLowerCase()}_ascent_telemetry.gpx`
+              : `${submissionTargetDestination.code.toLowerCase()}_ministry_archival_certificate.pdf`,
+          sha256PostUploadDigest: gpxDigest,
+          uploadedAtUtc: new Date().toISOString(),
+          extractedMetadata: {
+            deviceModel:
+              subTrack === 'STANDARD_DIGITAL'
+                ? 'Multi-Band GNSS + Barometric Altimeter'
+                : 'Official Ministry Archival Registry Document',
+            captureTimestampUtc: `${subCompletionDate}T06:30:00Z`,
+            recordedMaxElevationM: subMaxElevM,
+            distanceSummitedFromApexM: subApexDistM,
+            rolling15mMaxAscentMPerHr: subAscentRate,
+            residentialStartEndMasked: true,
+            permitReferenceCode: subPermitRef,
+          },
+        },
+      ],
+      advisoryAiAssessment: {
+        modelId: 'gemini-3-flash-preview (Server-Side Advisory Only)',
+        generatedAtUtc: new Date().toISOString(),
+        advisoryRiskLevel:
+          liveTelemetryPreview.withinGeofence &&
+          liveTelemetryPreview.withinElevationBand &&
+          liveTelemetryPreview.withinKinematicAscentEnvelope
+            ? 'LOW'
+            : 'MEDIUM',
+        kinematicConsistencyNote: liveTelemetryPreview.summaryNotes.join(' · '),
+        exifForensicNote:
+          'Post-upload SHA-256 byte integrity locked. Multi-modal spatio-temporal corroboration ready for human officer evaluation.',
+        duplicateCheckNote: 'Perceptual hash scan complete: 0 duplicate collisions.',
+        disclaimer:
+          'ADVISORY AI ANALYSIS ONLY — AI has zero permission to approve or reject achievements.',
+      },
+      status: 'UNDER_REVIEW',
+      requiresDualHumanReview:
+        submissionTargetDestination.tier === 'TIER_A_EXPEDITION' ||
+        subTrack === 'HISTORICAL_DOCUMENTARY',
+      humanReviews: [],
+      submittedAtUtc: new Date().toISOString(),
+    };
+
+    setSubmissions((prev) => [newSub, ...prev]);
+    setSelectedSubmissionId(newSub.id);
+    setSubmissionFeedback(
+      `Dossier ${subCode} created and locked in Private Evidence Vault (Post-Upload SHA-256: ${gpxDigest.slice(0, 16)}...). Routed to the Independent Verification Department.`
+    );
+
+    appendAuditEvent(
+      'REGISTERED_ADVENTURER',
+      newSub.applicantUserId,
+      'ACHIEVEMENT_DOSSIER_SUBMITTED',
+      'ACHIEVEMENT_SUBMISSION',
+      subCode,
+      `Submitted ${subTrack} dossier for ${submissionTargetDestination.officialNameEn} (${submissionTargetDestination.elevationM}m).`
+    );
+  };
+
+  // Execute Human Verification Decision or Appeal Tribunal Decision
+  const handleExecuteHumanDecision = (
+    decisionType: 'APPROVE' | 'REJECT' | 'OVERTURN_AND_APPROVE' | 'UPHOLD_REJECTION'
+  ) => {
+    const isAppeal = selectedSubmission.status === 'APPEALED';
+
+    // 1. Check Role Boundary
+    if (!isAppeal && activeActor.role !== 'VERIFICATION_OFFICER' && activeActor.role !== 'SENIOR_VERIFICATION_LEAD') {
+      setWorkstationBanner({
+        type: 'ERROR',
+        text: `Constitutional Firewall Blocked: Role (${activeActor.role}) is prohibited from making verification decisions. Only human officers of the Independent Verification Department may approve or reject submissions.`,
+      });
+      appendAuditEvent(
+        activeActor.role,
+        activeActor.userId,
+        'FIREWALL_BLOCK_NON_REVIEWER_DECISION',
+        'ACHIEVEMENT_SUBMISSION',
+        selectedSubmission.submissionCode,
+        `Blocked non-verification role (${activeActor.role}) from deciding ${selectedSubmission.submissionCode}.`
+      );
+      return;
+    }
+
+    if (isAppeal && activeActor.role !== 'APPEAL_OFFICER') {
+      setWorkstationBanner({
+        type: 'ERROR',
+        text: `Appeal Tribunal Firewall Blocked: Role (${activeActor.role}) cannot adjudicate appeals. Only members of the Independent Appeal Review Team may resolve disputed decisions.`,
+      });
+      appendAuditEvent(
+        activeActor.role,
+        activeActor.userId,
+        'FIREWALL_BLOCK_NON_APPEAL_OFFICER',
+        'APPEAL_RECORD',
+        selectedSubmission.submissionCode,
+        `Blocked role (${activeActor.role}) from adjudicating appeal on ${selectedSubmission.submissionCode}.`
+      );
+      return;
+    }
+
+    // 2. Check 5-Signal Automated Conflict-of-Interest (COI) Engine
+    if (!activeCoiResult.overallPassed) {
+      setWorkstationBanner({
+        type: 'ERROR',
+        text: `Automated 5-Signal COI Engine Blocked Decision: ${activeCoiResult.blockingReason}`,
+      });
+      appendAuditEvent(
+        activeActor.role,
+        activeActor.userId,
+        'COI_VIOLATION_ATTEMPT_BLOCKED',
+        'ACHIEVEMENT_SUBMISSION',
+        selectedSubmission.submissionCode,
+        `5-Signal COI Blocker prevented ${activeActor.officerCode} from deciding ${selectedSubmission.submissionCode}: ${activeCoiResult.blockingReason}`
+      );
+      return;
+    }
+
+    // 3. Check Logged Human COI Attestation Checkbox
+    if (!coiAttestedByOfficer) {
+      setWorkstationBanner({
+        type: 'ERROR',
+        text: 'Mandatory Governance Gate: You must check the Conflict-of-Interest & Blind Review Attestation box before recording a human decision.',
+      });
+      return;
+    }
+
+    const nowUtc = new Date().toISOString();
+    const decisionHmac = computeDeterministicHmacDigest(
+      `${selectedSubmission.id}|${activeActor.userId}|${decisionType}|${nowUtc}`,
+      'HUMAN_REVIEW_KEY'
+    );
+
+    const newReviewRecord = {
+      reviewId: `rev-${Date.now()}`,
+      reviewerUserId: activeActor.userId,
+      reviewerOfficerCode: activeActor.officerCode,
+      reviewerRole: activeActor.role as
+        | 'VERIFICATION_OFFICER'
+        | 'SENIOR_VERIFICATION_LEAD'
+        | 'APPEAL_OFFICER',
+      coiAutomatedCheckPassed: true,
+      coiHumanAttestationSigned: true,
+      decision: decisionType,
+      humanRationale: reviewRationaleInput,
+      decidedAtUtc: nowUtc,
+      decisionHmacSignature: decisionHmac,
+    };
+
+    const updatedReviews = [...selectedSubmission.humanReviews, newReviewRecord];
+    const approvalCount = updatedReviews.filter(
+      (r) => r.decision === 'APPROVE' || r.decision === 'OVERTURN_AND_APPROVE'
+    ).length;
+
+    let nextStatus = selectedSubmission.status;
+    let newlyIssuedCert: PublicCertificateRecord | null = null;
+
+    if (decisionType === 'REJECT' || decisionType === 'UPHOLD_REJECTION') {
+      nextStatus = 'REJECTED';
+    } else if (
+      decisionType === 'OVERTURN_AND_APPROVE' ||
+      !selectedSubmission.requiresDualHumanReview ||
+      approvalCount >= 2
+    ) {
+      nextStatus = 'APPROVED';
+      const verificationId = generateNonEnumerableVerificationId(certificates.length + 10);
+      const destObj =
+        destinations.find((d) => d.id === selectedSubmission.destinationId) || destinations[0];
+
+      const publicNameDisplay =
+        selectedSubmission.privacyConsent.publicIdentityMode === 'FULL_VERIFIED_NAME'
+          ? selectedSubmission.applicantDisplayName
+          : selectedSubmission.privacyConsent.publicIdentityMode === 'DISPLAY_HANDLE_OR_INITIALS'
+          ? `${selectedSubmission.applicantInitials} (Initials Consent Mode)`
+          : 'Private Credential Holder (Identity Redacted by Holder Consent)';
+
+      const rawDate = selectedSubmission.completionDateUtc.slice(0, 10);
+      const publicDateDisplay =
+        selectedSubmission.privacyConsent.publicDatePrecision === 'EXACT_DATE'
+          ? rawDate
+          : selectedSubmission.privacyConsent.publicDatePrecision === 'MONTH_AND_YEAR_ONLY'
+          ? rawDate.slice(0, 7)
+          : rawDate.slice(0, 4);
+
+      newlyIssuedCert = {
+        verificationId,
+        submissionId: selectedSubmission.id,
+        holderUserId: selectedSubmission.applicantUserId,
+        holderPublicDisplay: publicNameDisplay,
+        holderPrivacyMode: selectedSubmission.privacyConsent.publicIdentityMode,
+        holderNationality: selectedSubmission.applicantNationality,
+        destinationId: destObj.id,
+        destinationCode: destObj.code,
+        destinationNameEn: destObj.officialNameEn,
+        destinationNameNe: destObj.officialNameNe,
+        verifiedElevationM: destObj.elevationM,
+        verifiedElevationFt: destObj.elevationFt,
+        elevationSourceCitation: destObj.elevationReferenceSource,
+        routeName: selectedSubmission.routeName,
+        verificationTrack: selectedSubmission.verificationTrack,
+        publicCompletionDateDisplay: publicDateDisplay,
+        issuedAtUtc: nowUtc,
+        status: 'VALID',
+        reviewingOfficersCodes: updatedReviews.map((r) => r.reviewerOfficerCode),
+        badgeCode: destObj.badgeIdentity.badgeCode,
+        certificateIntegrityDigest: decisionHmac.replace('hmac256:', ''),
+        optInPublicLeaderboards: selectedSubmission.privacyConsent.optInPublicLeaderboards,
+      };
+    } else {
+      nextStatus = 'AWAITING_SECOND_REVIEW';
+    }
+
+    setSubmissions((prev) =>
+      prev.map((s) =>
+        s.id === selectedSubmission.id
+          ? {
+              ...s,
+              status: nextStatus,
+              humanReviews: updatedReviews,
+              issuedCertificateId: newlyIssuedCert
+                ? newlyIssuedCert.verificationId
+                : s.issuedCertificateId,
+            }
+          : s
+      )
+    );
+
+    if (newlyIssuedCert) {
+      setCertificates((prev) => [newlyIssuedCert!, ...prev]);
+      setVerifyLookupId(newlyIssuedCert.verificationId);
+    }
+
+    appendAuditEvent(
+      activeActor.role,
+      activeActor.userId,
+      `HUMAN_REVIEW_${decisionType}`,
+      'ACHIEVEMENT_SUBMISSION',
+      selectedSubmission.submissionCode,
+      `Officer ${activeActor.officerCode} recorded ${decisionType} on ${selectedSubmission.submissionCode} -> Status: ${nextStatus}.${
+        newlyIssuedCert ? ` Free Certificate Issued: ${newlyIssuedCert.verificationId}` : ''
+      }`
+    );
+
+    setWorkstationBanner({
+      type: 'SUCCESS',
+      text: newlyIssuedCert
+        ? `Human Verification Complete (${nextStatus}): Free 3D Badge & Official Certificate (${newlyIssuedCert.verificationId}) issued and indexed on public verifier.`
+        : `Decision (${decisionType}) recorded by ${activeActor.officerCode}. Current dossier state: ${nextStatus}.`,
+    });
+  };
+
+  // Trigger Server-Side Advisory AI Brief (Non-Decisional)
+  const handleRequestServerAiBrief = async () => {
+    setAiBriefLoading(true);
+    setAiBriefText(null);
+    try {
+      const response = await fetch('/api/v1/ai/advisory-brief', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          destinationCode: selectedSubmission.destinationId.toUpperCase(),
+          destinationName: selectedSubmission.destinationName,
+          elevationM: selectedSubmission.destinationElevationM,
+          routeName: selectedSubmission.routeName,
+        }),
+      });
+      const data = await response.json();
+      setAiBriefText(`[${data.source}] ${data.summary}`);
+    } catch {
+      setAiBriefText(
+        '[DETERMINISTIC_FORENSIC_FALLBACK] Advisory check: Corroborate GPX apex geofence intersection, barometric altitude channel, raw EXIF solar azimuth, and official permit.'
+      );
+    } finally {
+      setAiBriefLoading(false);
+    }
+  };
+
+  // Dual-Control Certificate Revocation or GDPR User Erasure Simulation
+  const handleCertificateLifecycleAction = (
+    cert: PublicCertificateRecord,
+    mode: 'DUAL_CONTROL_REVOKE' | 'GDPR_USER_ERASURE_SHRED'
+  ) => {
+    if (
+      mode === 'DUAL_CONTROL_REVOKE' &&
+      activeActor.role !== 'FOUNDER' &&
+      activeActor.role !== 'GOVERNANCE_COMMITTEE' &&
+      activeActor.role !== 'SENIOR_VERIFICATION_LEAD'
+    ) {
+      setWorkstationBanner({
+        type: 'ERROR',
+        text: `Dual-Control Revocation Blocked: Role (${activeActor.role}) cannot revoke issued certificates.`,
+      });
+      return;
+    }
+
+    setCertificates((prev) =>
+      prev.map((c) => {
+        if (c.verificationId !== cert.verificationId) return c;
+        if (mode === 'DUAL_CONTROL_REVOKE') {
+          return {
+            ...c,
+            status: 'REVOKED',
+            optInPublicLeaderboards: false,
+            revocationOrCorrectionNote:
+              'REVOKED under Dual-Control Governance Resolution: Post-issuance audit invalidated achievement. Removed from public standings.',
+          };
+        }
+        return {
+          ...c,
+          status: 'DEACTIVATED_BY_USER_ERASURE',
+          holderPublicDisplay: 'Erased under GDPR Key-Shredding (user_dek Destroyed)',
+          holderNationality: 'Erased',
+          optInPublicLeaderboards: false,
+          revocationOrCorrectionNote:
+            'Record deactivated at the request of the credential holder (Correction 2.5). Personal identity erased from user_pii_vault; anonymized cryptographic audit chain preserved.',
+        };
+      })
+    );
+
+    appendAuditEvent(
+      activeActor.role,
+      activeActor.userId,
+      mode === 'DUAL_CONTROL_REVOKE'
+        ? 'CERTIFICATE_REVOKED_DUAL_CONTROL'
+        : 'USER_PII_ERASURE_KEY_SHREDDED',
+      'PUBLIC_CERTIFICATE',
+      cert.verificationId,
+      mode === 'DUAL_CONTROL_REVOKE'
+        ? `Executed Dual-Control Revocation on certificate ${cert.verificationId}; recalculated verified leaderboards.`
+        : `Shredded user_dek in user_pii_vault and transitioned certificate ${cert.verificationId} to DEACTIVATED_BY_USER_ERASURE while keeping WORM audit chain intact.`
+    );
+  };
+
+  // Test Hard-Locked Payment & Blockchain Endpoints
+  const handleTestHardLockedEndpoint = async (endpoint: 'payments' | 'blockchain') => {
+    const url =
+      endpoint === 'payments' ? '/api/v1/payments/checkout' : '/api/v1/blockchain/mint';
+    try {
+      const res = await fetch(url, { method: 'POST' });
+      const data = await res.json();
+      setGateTestMessage(`HTTP ${res.status} — ${data.code}: ${data.message}`);
+    } catch {
+      setGateTestMessage(
+        endpoint === 'payments'
+          ? 'HTTP 503 — PHASE_17_HARD_LOCK: Real payment collection is disabled until company registration, legal review, financial compliance, and security readiness are confirmed.'
+          : 'HTTP 503 — PHASE_18_HARD_LOCK: Blockchain minting is disabled until legal approval, smart contract security audit, and Founder authorization.'
+      );
+    }
+  };
+
+  // Computed Verified Leaderboards (Strictly from VALID certificates where optInPublicLeaderboards === true)
+  const verifiedLeaderboardRows = useMemo(() => {
+    const validCerts = certificates.filter(
+      (c) => c.status === 'VALID' && c.optInPublicLeaderboards
+    );
+    const byHolder = new Map<
+      string,
+      {
+        holderUserId: string;
+        displayName: string;
+        nationality: string;
+        verifiedCount: number;
+        cumulativeElevationM: number;
+        highestApexM: number;
+        latestVerificationId: string;
+        badges: string[];
+      }
+    >();
+
+    for (const cert of validCerts) {
+      const existing = byHolder.get(cert.holderUserId);
+      if (!existing) {
+        byHolder.set(cert.holderUserId, {
+          holderUserId: cert.holderUserId,
+          displayName: cert.holderPublicDisplay,
+          nationality: cert.holderNationality,
+          verifiedCount: 1,
+          cumulativeElevationM: cert.verifiedElevationM,
+          highestApexM: cert.verifiedElevationM,
+          latestVerificationId: cert.verificationId,
+          badges: [cert.destinationNameEn.split(' (')[0]],
+        });
+      } else {
+        existing.verifiedCount += 1;
+        existing.cumulativeElevationM += cert.verifiedElevationM;
+        existing.highestApexM = Math.max(existing.highestApexM, cert.verifiedElevationM);
+        existing.badges.push(cert.destinationNameEn.split(' (')[0]);
+      }
+    }
+
+    const rows = Array.from(byHolder.values());
+    rows.sort((a, b) => {
+      if (leaderboardMetric === 'VERIFIED_COUNT') {
+        return b.verifiedCount - a.verifiedCount || b.highestApexM - a.highestApexM;
+      }
+      if (leaderboardMetric === 'HIGHEST_APEX') {
+        return b.highestApexM - a.highestApexM || b.cumulativeElevationM - a.cumulativeElevationM;
+      }
+      return b.cumulativeElevationM - a.cumulativeElevationM;
+    });
+    return rows;
+  }, [certificates, leaderboardMetric]);
+
+  const currentRbacEvaluation = useMemo(
+    () => evaluateRbacPermission(testRole, testResource, testVerb),
+    [testRole, testResource, testVerb]
+  );
+
+  // Stage counts across the 100 destinations
+  const stageCounts = useMemo(() => {
+    return {
+      total: destinations.length,
+      published: destinations.filter((d) => d.researchStage === '5_PUBLISHED').length,
+      approved: destinations.filter((d) => d.researchStage === '4_REVIEWED_AND_APPROVED').length,
+      researchDone: destinations.filter((d) => d.researchStage === '3_RESEARCH_COMPLETED').length,
+      underResearch: destinations.filter((d) => d.researchStage === '2_UNDER_RESEARCH').length,
+      proposed: destinations.filter((d) => d.researchStage === '1_PROPOSED').length,
+    };
+  }, [destinations]);
+
+  return (
+    <div className="min-h-screen bg-[#0A0A0A] text-white flex flex-col">
+      {/* =====================================================================
+          MANDATORY 3-ZONE TOP BAR CONTRACT
+          Zone 1: Single wordmark | Zone 2: 5 single-line nav links | Zone 3: 1 primary CTA
+      ===================================================================== */}
+      <header className="sticky top-0 z-40 bg-[#0A0A0A]/95 backdrop-blur-md border-b border-[#C9A86A]/25 px-6 py-4 flex items-center justify-between gap-8">
+        {/* Zone 1: Single text element wordmark */}
+        <a
+          href="#top"
+          onClick={(e) => {
+            e.preventDefault();
+            setActiveSection('DESTINATIONS');
+          }}
+          className="font-display text-xl font-bold tracking-wider text-[#FFD700] whitespace-nowrap shrink-0"
+        >
+          0 TO 8848
+        </a>
+
+        {/* Zone 2: 5 concise single-line navigation links */}
+        <nav className="hidden lg:flex items-center gap-7 text-sm font-medium text-[#A1A1AA]">
+          <button
+            type="button"
+            onClick={() => setActiveSection('DESTINATIONS')}
+            className={`hover:text-white transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
+              activeSection === 'DESTINATIONS'
+                ? 'text-[#FFD700] border-b border-[#FFD700]'
+                : ''
+            }`}
+          >
+            {lang === 'EN' ? '100 Destinations' : '१०० गन्तव्यहरू'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveSection('SUBMIT_PROVE')}
+            className={`hover:text-white transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
+              activeSection === 'SUBMIT_PROVE'
+                ? 'text-[#FFD700] border-b border-[#FFD700]'
+                : ''
+            }`}
+          >
+            {lang === 'EN' ? 'Submit Evidence' : 'प्रमाण पेश गर्नुहोस्'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveSection('VERIFICATION_APPEALS')}
+            className={`hover:text-white transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
+              activeSection === 'VERIFICATION_APPEALS'
+                ? 'text-[#FFD700] border-b border-[#FFD700]'
+                : ''
+            }`}
+          >
+            {lang === 'EN' ? 'Verification & Appeals' : 'प्रमाणीकरण र पुनरावेदन'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveSection('CERTIFICATES_STANDINGS')}
+            className={`hover:text-white transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
+              activeSection === 'CERTIFICATES_STANDINGS'
+                ? 'text-[#FFD700] border-b border-[#FFD700]'
+                : ''
+            }`}
+          >
+            {lang === 'EN' ? 'Registry & Standings' : 'प्रमाणपत्र र वरीयता'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveSection('GOVERNANCE_PHASES')}
+            className={`hover:text-white transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
+              activeSection === 'GOVERNANCE_PHASES'
+                ? 'text-[#FFD700] border-b border-[#FFD700]'
+                : ''
+            }`}
+          >
+            {lang === 'EN' ? 'Governance & 21 Phases' : 'सुशासन र २१ चरण'}
+          </button>
+        </nav>
+
+        {/* Zone 3: 1 primary action */}
+        <div className="flex items-center shrink-0">
+          <button
+            type="button"
+            onClick={() => setActiveSection('CERTIFICATES_STANDINGS')}
+            className="px-4 py-2 text-xs font-semibold text-[#0A0A0A] bg-[#C9A86A] hover:bg-[#FFD700] rounded-lg transition-colors whitespace-nowrap shrink-0"
+          >
+            {lang === 'EN' ? 'Verify Credential' : 'प्रमाणपत्र जाँच'}
+          </button>
+        </div>
+      </header>
+
+      {/* =====================================================================
+          OPERATIONAL GOVERNANCE & ROLE SIMULATION TOOLBAR (Below Header)
+      ===================================================================== */}
+      <div className="bg-[#121214] border-b border-white/10 px-6 py-2.5">
+        <div className="max-w-[1400px] mx-auto flex flex-wrap items-center justify-between gap-4 text-xs">
+          <div className="flex flex-wrap items-center gap-3 text-[#A1A1AA]">
+            <span className="text-[#C9A86A] font-medium">
+              {lang === 'EN'
+                ? 'BUILT IN NEPAL. MADE FOR THE WORLD.'
+                : 'नेपालमा निर्मित। विश्वका लागि समर्पित।'}
+            </span>
+            <span aria-hidden="true">·</span>
+            <span>
+              {lang === 'EN'
+                ? 'ACHIEVEMENTS MUST BE EARNED, NEVER BOUGHT'
+                : 'उपलब्धि कमाउनुपर्छ, किन्न सकिँदैन'}
+            </span>
+          </div>
+
+          {/* Mobile Section Switcher + Role Simulation + Language & Units */}
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex lg:hidden items-center gap-1 bg-[#18181B] p-1 rounded-lg border border-white/10">
+              {(
+                [
+                  ['DESTINATIONS', 'Catalog'],
+                  ['SUBMIT_PROVE', 'Submit'],
+                  ['VERIFICATION_APPEALS', 'Verify'],
+                  ['CERTIFICATES_STANDINGS', 'Registry'],
+                  ['GOVERNANCE_PHASES', 'Governance'],
+                ] as [ActiveSection, string][]
+              ).map(([sec, label]) => (
+                <button
+                  key={sec}
+                  type="button"
+                  onClick={() => setActiveSection(sec)}
+                  className={`px-2 py-1 rounded text-xs font-medium whitespace-nowrap shrink-0 ${
+                    activeSection === sec
+                      ? 'bg-[#C9A86A] text-[#0A0A0A]'
+                      : 'text-[#A1A1AA] hover:text-white'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            <label className="flex items-center gap-2 text-[#A1A1AA]">
+              <span className="whitespace-nowrap">Active Role Context:</span>
+              <select
+                value={activeActorKey}
+                onChange={(e) => {
+                  setActiveActorKey(e.target.value);
+                  setCoiAttestedByOfficer(false);
+                  setWorkstationBanner(null);
+                }}
+                className="bg-[#18181B] text-white border border-[#C9A86A]/40 rounded px-2.5 py-1 text-xs focus:outline-none focus:border-[#FFD700]"
+              >
+                {Object.entries(DEMO_ACTOR_PROFILES).map(([key, prof]) => (
+                  <option key={key} value={key}>
+                    {prof.displayName} [{prof.role}]
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="flex items-center gap-1 bg-[#18181B] p-0.5 rounded border border-white/10">
+              <button
+                type="button"
+                onClick={() => setLang('EN')}
+                className={`px-2 py-1 rounded text-xs font-medium whitespace-nowrap shrink-0 ${
+                  lang === 'EN' ? 'bg-[#C9A86A] text-[#0A0A0A]' : 'text-[#A1A1AA] hover:text-white'
+                }`}
+              >
+                EN
+              </button>
+              <button
+                type="button"
+                onClick={() => setLang('NE')}
+                className={`px-2 py-1 rounded text-xs font-nepali font-medium whitespace-nowrap shrink-0 ${
+                  lang === 'NE' ? 'bg-[#C9A86A] text-[#0A0A0A]' : 'text-[#A1A1AA] hover:text-white'
+                }`}
+              >
+                नेपाली
+              </button>
+            </div>
+
+            <div className="flex items-center gap-1 bg-[#18181B] p-0.5 rounded border border-white/10">
+              <button
+                type="button"
+                onClick={() => setUnitSystem('METRIC')}
+                className={`px-2 py-1 rounded text-xs font-mono-tabular whitespace-nowrap shrink-0 ${
+                  unitSystem === 'METRIC'
+                    ? 'bg-[#C9A86A] text-[#0A0A0A]'
+                    : 'text-[#A1A1AA] hover:text-white'
+                }`}
+              >
+                Meters (m)
+              </button>
+              <button
+                type="button"
+                onClick={() => setUnitSystem('IMPERIAL')}
+                className={`px-2 py-1 rounded text-xs font-mono-tabular whitespace-nowrap shrink-0 ${
+                  unitSystem === 'IMPERIAL'
+                    ? 'bg-[#C9A86A] text-[#0A0A0A]'
+                    : 'text-[#A1A1AA] hover:text-white'
+                }`}
+              >
+                Feet (ft)
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Global Notification Banner for Governance / RBAC Feedback */}
+      {workstationBanner && (
+        <div
+          className={`px-6 py-3 border-b text-xs flex items-center justify-between gap-4 ${
+            workstationBanner.type === 'ERROR'
+              ? 'bg-red-950/80 border-red-500/40 text-red-200'
+              : workstationBanner.type === 'SUCCESS'
+              ? 'bg-emerald-950/80 border-emerald-500/40 text-emerald-200'
+              : 'bg-[#18181B] border-[#C9A86A]/40 text-[#FFD700]'
+          }`}
+        >
+          <div className="max-w-[1400px] mx-auto w-full flex items-center justify-between gap-4">
+            <div className="flex items-center gap-2">
+              {workstationBanner.type === 'ERROR' ? (
+                <ShieldAlert className="w-4 h-4 text-red-400 shrink-0" />
+              ) : (
+                <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+              )}
+              <span>{workstationBanner.text}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setWorkstationBanner(null)}
+              className="text-xs underline whitespace-nowrap shrink-0"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          MAIN VIEWPORT CONTAINER
+      ===================================================================== */}
+      <main className="flex-1 max-w-[1400px] w-full mx-auto px-6 py-8 space-y-12">
+        {/* ===================================================================
+            SECTION 1: 100 GLOBAL DESTINATIONS & 5-STAGE RESEARCH PIPELINE
+        =================================================================== */}
+        {activeSection === 'DESTINATIONS' && (
+          <>
+            {/* Hero Split Section */}
+            <section className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch">
+              <div className="lg:col-span-7 flex flex-col justify-between bg-[#121214] border border-white/10 rounded-2xl p-8">
+                <div className="space-y-5">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-[#C9A86A] font-mono-tabular">
+                    <span>0m SEA LEVEL TO 8,848.86m SAGARMATHA</span>
+                    <span aria-hidden="true">·</span>
+                    <span>ORIGIN: NEPAL</span>
+                    <span aria-hidden="true">·</span>
+                    <span>TARGET: WORLDWIDE</span>
+                  </div>
+
+                  <h1
+                    className="font-display text-3xl sm:text-5xl font-bold text-white tracking-tight leading-tight"
+                    style={{ textWrap: 'balance' }}
+                  >
+                    {lang === 'EN'
+                      ? 'Explore. Achieve. Prove.'
+                      : 'अन्वेषण गर्नुहोस्। हासिल गर्नुहोस्। प्रमाणित गर्नुहोस्।'}
+                  </h1>
+
+                  <p className="text-base text-[#A1A1AA] leading-relaxed max-w-2xl">
+                    {lang === 'EN'
+                      ? 'The institutional registry of human outdoor achievement across 100 iconic destinations on six continents. Every public recognition is backed by corroborated multi-modal telemetry, raw EXIF forensics, and an independent human verification department—never bought.'
+                      : 'छ महाद्वीपका १०० प्रमुख साहसिक गन्तव्यहरूमा मानव उपलब्धिको विश्वव्यापी प्रमाणीकरण प्लेटफर्म। प्रत्येक उपलब्धि स्वतन्त्र मानवीय परीक्षण र बहु-आयामिक प्रमाणद्वारा प्रमाणित हुन्छ।'}
+                  </p>
+
+                  {/* Five Permanent Principles */}
+                  <div className="pt-4 border-t border-white/10 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs text-[#A1A1AA]">
+                    <div>01. Every Adventurer Deserves Respect.</div>
+                    <div>02. Every Achievement Deserves Recognition.</div>
+                    <div>03. Every Journey Has a Story.</div>
+                    <div>04. Every Badge Must Be Earned.</div>
+                    <div className="sm:col-span-2 text-[#C9A86A] font-medium">
+                      05. Adventure Unites The World — Non-Negotiable Rule: Achievements Must Be Earned, Never Bought.
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-6 mt-6 border-t border-white/10 flex flex-wrap items-center gap-4">
+                  <button
+                    type="button"
+                    onClick={() => setActiveSection('SUBMIT_PROVE')}
+                    className="px-5 py-2.5 text-sm font-semibold text-[#0A0A0A] bg-[#C9A86A] hover:bg-[#FFD700] rounded-lg transition-colors whitespace-nowrap shrink-0"
+                  >
+                    Submit Achievement Evidence
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveSection('VERIFICATION_APPEALS')}
+                    className="px-5 py-2.5 text-sm font-medium text-white bg-[#18181B] border border-[#C9A86A]/40 hover:border-[#FFD700] rounded-lg transition-colors whitespace-nowrap shrink-0"
+                  >
+                    Inspect Verification Workstation
+                  </button>
+                </div>
+              </div>
+
+              {/* Hero Visual Frame with Measured Contrast Scrim */}
+              <div className="lg:col-span-5 relative rounded-2xl overflow-hidden border border-[#C9A86A]/30 min-h-[340px] bg-[#121214] flex flex-col justify-end">
+                <img
+                  src={HERO_EVEREST_IMG}
+                  alt="Mount Everest (Sagarmatha) and Lhotse summit pyramid at twilight from high camp"
+                  referrerPolicy="no-referrer"
+                  className="absolute inset-0 w-full h-full object-cover"
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/45 to-transparent" />
+                <div className="relative p-6 space-y-2">
+                  <div className="flex items-center gap-2 text-xs text-[#FFD700] font-mono-tabular">
+                    <span>DEST-001</span>
+                    <span aria-hidden="true">·</span>
+                    <span>27.9881° N, 86.9250° E</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{formatElev(8848.86)}</span>
+                  </div>
+                  <h2 className="font-display text-2xl font-bold text-white">
+                    Mount Everest · सगरमाथा
+                  </h2>
+                  <p className="text-xs text-neutral-300">
+                    Survey Department of Nepal (2020 Official Joint Trigonometric & GNSS Survey) · Stage 5 Published
+                  </p>
+                </div>
+              </div>
+            </section>
+
+            {/* Full-Width 4-Column Institutional Trust & Catalog Telemetry Strip */}
+            <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="bg-[#121214] border border-white/10 rounded-xl p-5">
+                <p className="text-xs text-[#A1A1AA]">Global Launch Catalog</p>
+                <p className="text-2xl font-bold text-white font-mono-tabular mt-1">
+                  100 Distinct Objectives
+                </p>
+                <p className="text-xs text-[#C9A86A] mt-1">
+                  32 Asia (18 Nepal Origin) · 18 Europe · 16 N. America · 14 S. America · 10 Africa · 10 Oceania
+                </p>
+              </div>
+              <div className="bg-[#121214] border border-white/10 rounded-xl p-5">
+                <p className="text-xs text-[#A1A1AA]">5-Stage Research Pipeline</p>
+                <p className="text-2xl font-bold text-[#FFD700] font-mono-tabular mt-1">
+                  {stageCounts.published} Published · {100 - stageCounts.published} In Research
+                </p>
+                <p className="text-xs text-[#A1A1AA] mt-1">
+                  Unverified destination data is never presented as confirmed
+                </p>
+              </div>
+              <div className="bg-[#121214] border border-white/10 rounded-xl p-5">
+                <p className="text-xs text-[#A1A1AA]">Verification Authority</p>
+                <p className="text-2xl font-bold text-white font-mono-tabular mt-1">
+                  100% Human Decided
+                </p>
+                <p className="text-xs text-emerald-400 mt-1">
+                  5-Signal COI Blocker · Dual-Review on Tier-A · Independent Appeals
+                </p>
+              </div>
+              <div className="bg-[#121214] border border-white/10 rounded-xl p-5">
+                <p className="text-xs text-[#A1A1AA]">Commercial & Crypto Locks</p>
+                <p className="text-2xl font-bold text-white font-mono-tabular mt-1">
+                  Badges & Certs: Free
+                </p>
+                <p className="text-xs text-[#A1A1AA] mt-1">
+                  Payments & Blockchain hard-locked (FALSE) until legal & security gates
+                </p>
+              </div>
+            </section>
+
+            {/* Featured Visual Spotlights Across Continents */}
+            <section className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              {[
+                {
+                  img: CARD_AMADABLAM_IMG,
+                  code: 'DEST-009',
+                  id: 'dest-009',
+                  title: 'Ama Dablam · आमा दब्लम',
+                  meta: `Nepal · ${formatElev(6812)} · Southwest Ridge`,
+                  note: 'Tier-A Technical Alpine · Dual Independent Human Review Required',
+                },
+                {
+                  img: CARD_ANNAPURNA_IMG,
+                  code: 'DEST-014',
+                  id: 'dest-014',
+                  title: 'Annapurna Circuit · थोराङ ला',
+                  meta: `Nepal · ${formatElev(5416)} · Thorong La Pass`,
+                  note: 'Tier-B High-Altitude Circuit · ACAP & Survey Dept Verified',
+                },
+                {
+                  img: CARD_KILIMANJARO_IMG,
+                  code: 'DEST-081',
+                  id: 'dest-081',
+                  title: 'Mount Kilimanjaro (Uhuru Peak)',
+                  meta: `Tanzania · ${formatElev(5895)} · Machame / Lemosho`,
+                  note: 'Africa Anchor · TANAPA Official Survey Citation Verified',
+                },
+              ].map((card) => (
+                <div
+                  key={card.code}
+                  onClick={() => setSelectedDestinationId(card.id)}
+                  className="group cursor-pointer bg-[#121214] border border-white/10 hover:border-[#C9A86A]/60 rounded-xl overflow-hidden transition-colors flex flex-col justify-between"
+                >
+                  <div className="relative h-48 overflow-hidden bg-[#18181B]">
+                    <img
+                      src={card.img}
+                      alt={card.title}
+                      referrerPolicy="no-referrer"
+                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
+                    />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+                    <div className="absolute bottom-3 left-4 right-4 flex items-center justify-between text-xs font-mono-tabular text-[#FFD700]">
+                      <span>{card.code}</span>
+                      <span>5_PUBLISHED</span>
+                    </div>
+                  </div>
+                  <div className="p-5 space-y-1.5">
+                    <h3 className="font-display text-lg font-bold text-white">{card.title}</h3>
+                    <p className="text-xs text-[#C9A86A] font-mono-tabular">{card.meta}</p>
+                    <p className="text-xs text-[#A1A1AA] pt-1">{card.note}</p>
+                  </div>
+                </div>
+              ))}
+            </section>
+
+            {/* Interactive 100-Destination Catalog & 5-Stage Research Inspector */}
+            <section className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+              {/* Left 7 Columns: Filterable 100-Destination Registry Table */}
+              <div className="lg:col-span-7 bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-5">
+                <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/10 pb-4">
+                  <div>
+                    <h2 className="font-display text-xl font-bold text-white">
+                      01. Global 100-Destination Catalog & Research Registry
+                    </h2>
+                    <p className="text-xs text-[#A1A1AA] mt-1">
+                      Showing {filteredDestinations.length} of 100 distinct global destinations · Select any record to inspect its 16 mandatory attributes & 3D badge
+                    </p>
+                  </div>
+
+                  {/* Search Input */}
+                  <div className="relative w-full sm:w-64">
+                    <Search className="w-4 h-4 text-[#A1A1AA] absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Search peak, code, country, route..."
+                      className="w-full bg-[#18181B] border border-white/15 rounded-lg pl-9 pr-3 py-1.5 text-xs text-white placeholder:text-[#A1A1AA] focus:outline-none focus:border-[#C9A86A]"
+                    />
+                  </div>
+                </div>
+
+                {/* Interactive Region Segmented Filter Buttons */}
+                <div className="flex flex-wrap items-center gap-1.5 bg-[#18181B] p-1.5 rounded-lg border border-white/10">
+                  {(
+                    [
+                      ['ALL', 'All Regions (100)'],
+                      ['NEPAL_ANCHOR', 'Nepal Origin (18)'],
+                      ['ASIA', 'Asia (32)'],
+                      ['EUROPE', 'Europe (18)'],
+                      ['NORTH_AMERICA', 'N. America (16)'],
+                      ['SOUTH_AMERICA', 'S. America (14)'],
+                      ['AFRICA', 'Africa (10)'],
+                      ['OCEANIA', 'Oceania (10)'],
+                    ] as [WorldRegion | 'ALL' | 'NEPAL_ANCHOR', string][]
+                  ).map(([regKey, label]) => (
+                    <button
+                      key={regKey}
+                      type="button"
+                      onClick={() => setSelectedRegion(regKey)}
+                      className={`px-2.5 py-1.5 rounded text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                        selectedRegion === regKey
+                          ? 'bg-[#C9A86A] text-[#0A0A0A] font-semibold'
+                          : 'text-[#A1A1AA] hover:text-white'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Interactive 5-Stage Research Pipeline Filter Buttons */}
+                <div className="flex flex-wrap items-center gap-1.5 bg-[#18181B] p-1.5 rounded-lg border border-white/10">
+                  {(
+                    [
+                      ['ALL', `All Stages (${stageCounts.total})`],
+                      ['5_PUBLISHED', `5. Published (${stageCounts.published})`],
+                      ['4_REVIEWED_AND_APPROVED', `4. Approved (${stageCounts.approved})`],
+                      ['3_RESEARCH_COMPLETED', `3. Research Done (${stageCounts.researchDone})`],
+                      ['2_UNDER_RESEARCH', `2. Under Research (${stageCounts.underResearch})`],
+                      ['1_PROPOSED', `1. Proposed (${stageCounts.proposed})`],
+                    ] as [ResearchStage | 'ALL', string][]
+                  ).map(([stKey, label]) => (
+                    <button
+                      key={stKey}
+                      type="button"
+                      onClick={() => setSelectedStage(stKey)}
+                      className={`px-2.5 py-1 rounded text-xs font-mono-tabular transition-colors whitespace-nowrap shrink-0 ${
+                        selectedStage === stKey
+                          ? 'bg-white text-[#0A0A0A] font-semibold'
+                          : 'text-[#A1A1AA] hover:text-white'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Scrollable High-Density Table */}
+                <div className="max-h-[540px] overflow-y-auto border border-white/10 rounded-xl divide-y divide-white/10">
+                  <table className="w-full text-left border-collapse">
+                    <thead className="bg-[#18181B] sticky top-0 z-10 text-[11px] uppercase tracking-wider text-[#A1A1AA]">
+                      <tr>
+                        <th className="py-2.5 px-3">Code</th>
+                        <th className="py-2.5 px-3">Official Destination</th>
+                        <th className="py-2.5 px-3">Region / ISO</th>
+                        <th className="py-2.5 px-3 text-right">Elevation</th>
+                        <th className="py-2.5 px-3">Research Stage</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5 text-xs">
+                      {filteredDestinations.map((dest) => {
+                        const isSelected = dest.id === selectedDestination.id;
+                        return (
+                          <tr
+                            key={dest.id}
+                            onClick={() => setSelectedDestinationId(dest.id)}
+                            className={`cursor-pointer transition-colors ${
+                              isSelected
+                                ? 'bg-[#C9A86A]/15 text-white'
+                                : 'hover:bg-white/5 text-neutral-200'
+                            }`}
+                          >
+                            <td className="py-2.5 px-3 font-mono-tabular text-[#C9A86A] whitespace-nowrap">
+                              {dest.code}
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <div className="font-medium text-white">
+                                {dest.officialNameEn}
+                              </div>
+                              {dest.officialNameNe && (
+                                <div className="font-nepali text-[11px] text-[#C9A86A]">
+                                  {dest.officialNameNe}
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-2.5 px-3 text-[#A1A1AA] whitespace-nowrap">
+                              {dest.region} · {dest.countryIsoCodes.join('/')}
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-mono-tabular text-[#FFD700] whitespace-nowrap">
+                              {formatElev(dest.elevationM)}
+                            </td>
+                            <td className="py-2.5 px-3 font-mono-tabular whitespace-nowrap">
+                              {dest.researchStage === '5_PUBLISHED' ? (
+                                <span className="text-emerald-400">5_PUBLISHED</span>
+                              ) : dest.researchStage === '4_REVIEWED_AND_APPROVED' ? (
+                                <span className="text-[#FFD700]">4_APPROVED</span>
+                              ) : (
+                                <span className="text-[#A1A1AA]">{dest.researchStage}</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Right 5 Columns: Selected Destination 16-Attribute Dossier & 3D Badge */}
+              <div className="lg:col-span-5 space-y-6">
+                <Badge3DViewer destination={selectedDestination} />
+
+                <div className="bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-4">
+                  <div className="border-b border-white/10 pb-3">
+                    <div className="flex items-center gap-2 text-xs font-mono-tabular text-[#C9A86A]">
+                      <span>{selectedDestination.code}</span>
+                      <span aria-hidden="true">·</span>
+                      <span>{selectedDestination.region}</span>
+                      <span aria-hidden="true">·</span>
+                      <span>
+                        {selectedDestination.coordinates.lat.toFixed(4)}°,{' '}
+                        {selectedDestination.coordinates.lng.toFixed(4)}°
+                      </span>
+                    </div>
+                    <h3 className="font-display text-2xl font-bold text-white mt-1">
+                      {selectedDestination.officialNameEn}
+                    </h3>
+                    {selectedDestination.officialNameNe && (
+                      <p className="font-nepali text-sm text-[#FFD700] mt-0.5">
+                        {selectedDestination.officialNameNe} ({selectedDestination.officialNameLocal})
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Research Status Notice */}
+                  <div className="p-3.5 rounded-lg bg-[#18181B] border border-white/10 text-xs space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#A1A1AA]">Research Workflow Stage:</span>
+                      <span className="font-mono-tabular font-semibold text-[#FFD700]">
+                        {selectedDestination.researchStage}
+                      </span>
+                    </div>
+                    <p className="text-[#A1A1AA]">
+                      {selectedDestination.researchStage === '5_PUBLISHED'
+                        ? 'Confirmed & Published: Geodetic survey citation and safety criteria verified by Governance Committee. Open for achievement submissions.'
+                        : 'UNPUBLISHED RESEARCH RECORD: In accordance with Phase 09 rules, unverified destination data is never presented as confirmed and cannot accept achievement submissions until Stage 5.'}
+                    </p>
+                    {selectedDestination.researchStage !== '5_PUBLISHED' && (
+                      <button
+                        type="button"
+                        onClick={() => handleAdvanceDestinationStage(selectedDestination)}
+                        className="w-full mt-2 px-3 py-2 text-xs font-semibold bg-[#C9A86A] text-[#0A0A0A] hover:bg-[#FFD700] rounded transition-colors"
+                      >
+                        Advance Research Stage (Current Role: {activeActor.role})
+                      </button>
+                    )}
+                  </div>
+
+                  {/* 16-Attribute Definition List */}
+                  <dl className="divide-y divide-white/10 text-xs">
+                    <div className="py-2 flex justify-between gap-4">
+                      <dt className="text-[#A1A1AA]">Target / Verified Elevation</dt>
+                      <dd className="font-mono-tabular text-white font-semibold text-right">
+                        {selectedDestination.elevationM.toLocaleString()} m /{' '}
+                        {selectedDestination.elevationFt.toLocaleString()} ft
+                      </dd>
+                    </div>
+                    <div className="py-2 flex flex-col gap-1">
+                      <dt className="text-[#A1A1AA]">Authoritative Reference Source</dt>
+                      <dd className="text-white">{selectedDestination.elevationReferenceSource}</dd>
+                    </div>
+                    <div className="py-2 flex flex-col gap-1">
+                      <dt className="text-[#A1A1AA]">Canonical Route & Distance</dt>
+                      <dd className="text-white">
+                        {selectedDestination.canonicalRouteName} ({selectedDestination.routeDistanceKm} km · +
+                        {selectedDestination.routeVerticalGainM.toLocaleString()}m gain)
+                      </dd>
+                    </div>
+                    <div className="py-2 flex justify-between gap-4">
+                      <dt className="text-[#A1A1AA]">Activity & Grade</dt>
+                      <dd className="text-white text-right">
+                        {selectedDestination.activityType} · {selectedDestination.difficultyGrade}
+                      </dd>
+                    </div>
+                    <div className="py-2 flex flex-col gap-1">
+                      <dt className="text-[#A1A1AA]">Permit & Access Authority</dt>
+                      <dd className="text-white">{selectedDestination.permitAndAccessRequirements}</dd>
+                    </div>
+                    <div className="py-2 flex justify-between gap-4">
+                      <dt className="text-[#A1A1AA]">Seasonal Window</dt>
+                      <dd className="text-white text-right">{selectedDestination.seasonalWindows}</dd>
+                    </div>
+                    <div className="py-2 flex flex-col gap-1">
+                      <dt className="text-[#A1A1AA]">Contextual Anti-Fraud Telemetry Envelope</dt>
+                      <dd className="font-mono-tabular text-[#C9A86A]">
+                        Apex Radius &le; {selectedDestination.telemetryEnvelope.summitGeofenceRadiusM}m · Elev Band &plusmn;
+                        {selectedDestination.telemetryEnvelope.elevationBandToleranceM}m · Max 15m Ascent &le;{' '}
+                        {selectedDestination.telemetryEnvelope.maxPlausibleAscentRateMPerHr} m/hr
+                      </dd>
+                    </div>
+                    <div className="py-2 flex flex-col gap-1">
+                      <dt className="text-[#A1A1AA]">Risk & Mountaineering Safety</dt>
+                      <dd className="text-neutral-300">{selectedDestination.riskAndSafetySummary}</dd>
+                    </div>
+                  </dl>
+
+                  {selectedDestination.researchStage === '5_PUBLISHED' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSubDestId(selectedDestination.id);
+                        setSubMaxElevM(selectedDestination.elevationM);
+                        setActiveSection('SUBMIT_PROVE');
+                      }}
+                      className="w-full py-2.5 px-4 text-xs font-semibold text-[#0A0A0A] bg-[#C9A86A] hover:bg-[#FFD700] rounded-lg transition-colors"
+                    >
+                      Submit Achievement Application for {selectedDestination.officialNameEn.split(' (')[0]}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </section>
+          </>
+        )}
+
+        {/* ===================================================================
+            SECTION 2: ACHIEVEMENT SUBMISSION & EVIDENCE ENGINE (PHASE 11)
+        =================================================================== */}
+        {activeSection === 'SUBMIT_PROVE' && (
+          <section className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+            <div className="lg:col-span-7 bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-6">
+              <div className="border-b border-white/10 pb-4">
+                <p className="text-xs text-[#C9A86A] font-mono-tabular">
+                  PHASE 11 · MULTI-MODAL EVIDENCE DOSSIER & PRIVACY ENGINE
+                </p>
+                <h2 className="font-display text-2xl font-bold text-white mt-1">
+                  Submit Achievement Application
+                </h2>
+                <p className="text-xs text-[#A1A1AA] mt-1">
+                  All raw GPX tracks, EXIF photos, and permits are isolated in the Private Evidence Vault. Start/end residential coordinates are masked automatically.
+                </p>
+              </div>
+
+              <form onSubmit={handleCreateSubmission} className="space-y-5 text-xs">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <label className="space-y-1.5 block">
+                    <span className="text-[#A1A1AA] font-medium">
+                      Select Published Destination (Stage 5 Only)
+                    </span>
+                    <select
+                      value={subDestId}
+                      onChange={(e) => {
+                        const found = publishedDestinations.find((d) => d.id === e.target.value);
+                        setSubDestId(e.target.value);
+                        if (found) setSubMaxElevM(found.elevationM);
+                      }}
+                      className="w-full bg-[#18181B] border border-white/15 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-[#C9A86A]"
+                    >
+                      {publishedDestinations.map((d) => (
+                        <option key={d.id} value={d.id}>
+                          {d.code} — {d.officialNameEn} ({d.elevationM}m)
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="space-y-1.5 block">
+                    <span className="text-[#A1A1AA] font-medium">
+                      Verification Evidentiary Track (Correction 2.8)
+                    </span>
+                    <select
+                      value={subTrack}
+                      onChange={(e) => setSubTrack(e.target.value as VerificationTrack)}
+                      className="w-full bg-[#18181B] border border-white/15 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-[#C9A86A]"
+                    >
+                      <option value="STANDARD_DIGITAL">
+                        Contemporary Digital Track (GPX/FIT + Raw EXIF + Permit)
+                      </option>
+                      <option value="HISTORICAL_DOCUMENTARY">
+                        Historical Documentary Track (Ministry Certificate + Archival Log)
+                      </option>
+                    </select>
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <label className="space-y-1.5 block">
+                    <span className="text-[#A1A1AA]">Adventurer Full Name</span>
+                    <input
+                      type="text"
+                      value={subHolderName}
+                      onChange={(e) => setSubHolderName(e.target.value)}
+                      required
+                      className="w-full bg-[#18181B] border border-white/15 rounded-lg px-3 py-2 text-white"
+                    />
+                  </label>
+                  <label className="space-y-1.5 block">
+                    <span className="text-[#A1A1AA]">Nationality / Country</span>
+                    <input
+                      type="text"
+                      value={subNationality}
+                      onChange={(e) => setSubNationality(e.target.value)}
+                      required
+                      className="w-full bg-[#18181B] border border-white/15 rounded-lg px-3 py-2 text-white"
+                    />
+                  </label>
+                  <label className="space-y-1.5 block">
+                    <span className="text-[#A1A1AA]">Completion Date</span>
+                    <input
+                      type="date"
+                      value={subCompletionDate}
+                      onChange={(e) => setSubCompletionDate(e.target.value)}
+                      required
+                      className="w-full bg-[#18181B] border border-white/15 rounded-lg px-3 py-2 text-white font-mono-tabular"
+                    />
+                  </label>
+                </div>
+
+                {/* Telemetry Simulation Inputs */}
+                <div className="p-4 rounded-xl bg-[#18181B] border border-white/10 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-[#C9A86A]">
+                      Extracted GPX / GNSS & Permit Forensic Parameters
+                    </span>
+                    <span className="font-mono-tabular text-[11px] text-[#A1A1AA]">
+                      Official Apex: {submissionTargetDestination.elevationM} m
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                    <label className="space-y-1 block">
+                      <span className="text-[#A1A1AA]">Recorded Max Elev (m)</span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        value={subMaxElevM}
+                        onChange={(e) => setSubMaxElevM(Number(e.target.value))}
+                        className="w-full bg-[#121214] border border-white/15 rounded px-2.5 py-1.5 text-white font-mono-tabular"
+                      />
+                    </label>
+                    <label className="space-y-1 block">
+                      <span className="text-[#A1A1AA]">Distance to Apex (m)</span>
+                      <input
+                        type="number"
+                        step="0.5"
+                        value={subApexDistM}
+                        onChange={(e) => setSubApexDistM(Number(e.target.value))}
+                        className="w-full bg-[#121214] border border-white/15 rounded px-2.5 py-1.5 text-white font-mono-tabular"
+                      />
+                    </label>
+                    <label className="space-y-1 block">
+                      <span className="text-[#A1A1AA]">15m Ascent (m/hr)</span>
+                      <input
+                        type="number"
+                        value={subAscentRate}
+                        onChange={(e) => setSubAscentRate(Number(e.target.value))}
+                        className="w-full bg-[#121214] border border-white/15 rounded px-2.5 py-1.5 text-white font-mono-tabular"
+                      />
+                    </label>
+                    <label className="space-y-1 block">
+                      <span className="text-[#A1A1AA]">Permit Reference ID</span>
+                      <input
+                        type="text"
+                        value={subPermitRef}
+                        onChange={(e) => setSubPermitRef(e.target.value)}
+                        className="w-full bg-[#121214] border border-white/15 rounded px-2.5 py-1.5 text-white font-mono-tabular"
+                      />
+                    </label>
+                  </div>
+
+                  <label className="flex items-center gap-2 text-neutral-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={subHasBaro}
+                      onChange={(e) => setSubHasBaro(e.target.checked)}
+                      className="rounded border-white/20"
+                    />
+                    <span>
+                      GPX/FIT file includes calibrated barometric pressure altimeter channel (Required on Tier-A peaks)
+                    </span>
+                  </label>
+                </div>
+
+                {/* Granular Holder Privacy Consent (Correction 2.9) */}
+                <div className="p-4 rounded-xl bg-[#18181B] border border-white/10 space-y-3">
+                  <p className="font-semibold text-white">
+                    Granular Public Verification & Privacy Consent (Correction 2.9)
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <label className="space-y-1 block">
+                      <span className="text-[#A1A1AA]">Public Certificate Holder Display</span>
+                      <select
+                        value={subIdentityConsent}
+                        onChange={(e) =>
+                          setSubIdentityConsent(
+                            e.target.value as
+                              | 'FULL_VERIFIED_NAME'
+                              | 'DISPLAY_HANDLE_OR_INITIALS'
+                              | 'PRIVATE_CREDENTIAL_HOLDER'
+                          )
+                        }
+                        className="w-full bg-[#121214] border border-white/15 rounded px-2.5 py-1.5 text-white"
+                      >
+                        <option value="FULL_VERIFIED_NAME">Full Verified Name</option>
+                        <option value="DISPLAY_HANDLE_OR_INITIALS">Initials Only (e.g. T. L. S.)</option>
+                        <option value="PRIVATE_CREDENTIAL_HOLDER">
+                          Private Credential Holder (Redacted Public Name)
+                        </option>
+                      </select>
+                    </label>
+
+                    <label className="space-y-1 block">
+                      <span className="text-[#A1A1AA]">Public Completion Date Precision</span>
+                      <select
+                        value={subDatePrecision}
+                        onChange={(e) =>
+                          setSubDatePrecision(
+                            e.target.value as 'EXACT_DATE' | 'MONTH_AND_YEAR_ONLY' | 'YEAR_ONLY'
+                          )
+                        }
+                        className="w-full bg-[#121214] border border-white/15 rounded px-2.5 py-1.5 text-white"
+                      >
+                        <option value="EXACT_DATE">Exact Date (YYYY-MM-DD)</option>
+                        <option value="MONTH_AND_YEAR_ONLY">Month & Year Only (YYYY-MM)</option>
+                        <option value="YEAR_ONLY">Year Only (YYYY)</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label className="flex items-center gap-2 text-neutral-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={subLeaderboardOptIn}
+                      onChange={(e) => setSubLeaderboardOptIn(e.target.checked)}
+                    />
+                    <span>
+                      Opt-in to include this achievement on Public Verified Leaderboards (Can be toggled off anytime)
+                    </span>
+                  </label>
+                </div>
+
+                <label className="space-y-1.5 block">
+                  <span className="text-[#A1A1AA]">Expedition Narrative & Route Conditions</span>
+                  <textarea
+                    rows={3}
+                    value={subNarrative}
+                    onChange={(e) => setSubNarrative(e.target.value)}
+                    className="w-full bg-[#18181B] border border-white/15 rounded-lg p-3 text-white"
+                  />
+                </label>
+
+                <label className="flex items-start gap-2.5 p-3 rounded-lg bg-[#18181B] border border-[#C9A86A]/30 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={subTruthDeclaration}
+                    onChange={(e) => setSubTruthDeclaration(e.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span className="text-neutral-200 leading-relaxed">
+                    <strong>Truthfulness & Anti-Fraud Declaration:</strong> I solemnly declare that I personally completed this ascent/trek in accordance with the route criteria and that all attached telemetry, photographs, and permits are authentic. I understand that forged evidence results in permanent revocation.
+                  </span>
+                </label>
+
+                <button
+                  type="submit"
+                  className="w-full py-3 px-5 text-sm font-semibold text-[#0A0A0A] bg-[#C9A86A] hover:bg-[#FFD700] rounded-lg transition-colors flex items-center justify-center gap-2"
+                >
+                  <Upload className="w-4 h-4" />
+                  <span>Lock Evidence in Private Vault & Submit to Verification Dept</span>
+                </button>
+
+                {submissionFeedback && (
+                  <div className="p-4 rounded-xl bg-emerald-950/60 border border-emerald-500/40 text-emerald-200 flex items-center justify-between gap-4">
+                    <span>{submissionFeedback}</span>
+                    <button
+                      type="button"
+                      onClick={() => setActiveSection('VERIFICATION_APPEALS')}
+                      className="px-3 py-1.5 bg-emerald-400 text-[#0A0A0A] font-semibold rounded whitespace-nowrap shrink-0"
+                    >
+                      Open in Workstation
+                    </button>
+                  </div>
+                )}
+              </form>
+            </div>
+
+            {/* Right 5 Columns: Live Contextual Telemetry & Integrity vs Authenticity Explainer */}
+            <div className="lg:col-span-5 space-y-6">
+              <div className="bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-4">
+                <h3 className="font-display text-lg font-bold text-white">
+                  Live Pre-Flight Contextual Telemetry Check (Correction 2.7)
+                </h3>
+                <p className="text-xs text-[#A1A1AA]">
+                  Evaluated against <strong>{submissionTargetDestination.officialNameEn}</strong> route envelope. Note: Anomalies never trigger automatic rejection—they generate diagnostic overlays for human reviewers.
+                </p>
+
+                <div className="space-y-2.5 text-xs">
+                  {liveTelemetryPreview.summaryNotes.map((note, idx) => (
+                    <div
+                      key={idx}
+                      className="p-3 rounded-lg bg-[#18181B] border border-white/10 font-mono-tabular text-neutral-200"
+                    >
+                      {note}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="p-4 rounded-xl bg-[#18181B] border border-[#C9A86A]/30 space-y-2 text-xs">
+                  <p className="font-semibold text-[#FFD700]">
+                    Correction 2.2 Enforcement: File Integrity vs. Real-World Authenticity
+                  </p>
+                  <p className="text-[#A1A1AA] leading-relaxed">
+                    <strong>1. SHA-256 Post-Upload Digest:</strong> Proves only that the file stored in the Private Evidence Vault has not been modified since upload. It does <em>not</em> prove a photo or GPX track is genuine.
+                  </p>
+                  <p className="text-[#A1A1AA] leading-relaxed">
+                    <strong>2. Multi-Layered Authenticity Corroboration:</strong> Evaluates C2PA/RAW camera headers, barometric pressure vs. GNSS altitude variance, solar shadow azimuth, perceptual hash duplicate scanning, official permits, and mandatory human reviewer judgment.
+                  </p>
+                </div>
+              </div>
+
+              <Badge3DViewer destination={submissionTargetDestination} compact />
+            </div>
+          </section>
+        )}
+
+        {/* ===================================================================
+            SECTION 3: INDEPENDENT HUMAN VERIFICATION WORKSTATION & APPEALS (PHASE 12)
+        =================================================================== */}
+        {activeSection === 'VERIFICATION_APPEALS' && (
+          <section className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+            {/* Left 4 Columns: Verification & Appeal Queue */}
+            <div className="lg:col-span-4 bg-[#121214] border border-white/10 rounded-2xl p-5 space-y-4">
+              <div className="border-b border-white/10 pb-3">
+                <p className="text-xs text-[#C9A86A] font-mono-tabular">
+                  INDEPENDENT VERIFICATION & APPEALS
+                </p>
+                <h2 className="font-display text-lg font-bold text-white mt-0.5">
+                  Active Dossier Queue ({submissions.length})
+                </h2>
+                <p className="text-xs text-[#A1A1AA] mt-1">
+                  Blind Reviewer Projection: Commercial & membership fields are stripped from all dossiers.
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                {submissions.map((sub) => {
+                  const isSelected = sub.id === selectedSubmission.id;
+                  return (
+                    <div
+                      key={sub.id}
+                      onClick={() => {
+                        setSelectedSubmissionId(sub.id);
+                        setCoiAttestedByOfficer(false);
+                        setAiBriefText(null);
+                      }}
+                      className={`cursor-pointer p-4 rounded-xl border transition-colors space-y-2 ${
+                        isSelected
+                          ? 'bg-[#18181B] border-[#FFD700]'
+                          : 'bg-[#18181B]/50 border-white/10 hover:border-white/30'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-xs font-mono-tabular">
+                        <span className="text-[#C9A86A]">{sub.submissionCode}</span>
+                        <span
+                          className={
+                            sub.status === 'APPROVED'
+                              ? 'text-emerald-400'
+                              : sub.status === 'APPEALED'
+                              ? 'text-amber-400'
+                              : sub.status === 'REJECTED'
+                              ? 'text-red-400'
+                              : 'text-[#FFD700]'
+                          }
+                        >
+                          {sub.status}
+                        </span>
+                      </div>
+                      <h3 className="font-semibold text-sm text-white">{sub.destinationName}</h3>
+                      <div className="text-xs text-[#A1A1AA]">
+                        <span>{sub.applicantDisplayName}</span>
+                        <span aria-hidden="true"> · </span>
+                        <span>{formatElev(sub.destinationElevationM)}</span>
+                        <span aria-hidden="true"> · </span>
+                        <span>{sub.requiresDualHumanReview ? 'Dual-Review (2P)' : 'Single Review'}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Right 8 Columns: Forensic Workstation, 5-Signal COI Gate & Human Decision Panel */}
+            <div className="lg:col-span-8 bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-6">
+              <div className="flex flex-wrap items-start justify-between gap-4 border-b border-white/10 pb-4">
+                <div>
+                  <div className="flex items-center gap-2 text-xs font-mono-tabular text-[#C9A86A]">
+                    <span>{selectedSubmission.submissionCode}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{selectedSubmission.verificationTrack}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>
+                      {selectedSubmission.requiresDualHumanReview
+                        ? 'TIER-A DUAL HUMAN REVIEW REQUIRED'
+                        : 'STANDARD HUMAN REVIEW'}
+                    </span>
+                  </div>
+                  <h2 className="font-display text-2xl font-bold text-white mt-1">
+                    {selectedSubmission.destinationName} ({formatElev(selectedSubmission.destinationElevationM)})
+                  </h2>
+                  <p className="text-xs text-[#A1A1AA] mt-0.5">
+                    Applicant: <strong className="text-white">{selectedSubmission.applicantDisplayName}</strong> ({selectedSubmission.applicantNationality}) · Route: {selectedSubmission.routeName}
+                  </p>
+                </div>
+
+                <div className="text-right font-mono-tabular text-xs">
+                  <div className="text-[#A1A1AA]">Current Status</div>
+                  <div className="text-sm font-bold text-[#FFD700] mt-0.5">
+                    {selectedSubmission.status}
+                  </div>
+                </div>
+              </div>
+
+              {/* 5-Signal Automated Conflict-of-Interest (COI) Gate (Correction 2.6) */}
+              <div
+                className={`p-4 rounded-xl border space-y-3 ${
+                  activeCoiResult.overallPassed
+                    ? 'bg-[#18181B] border-emerald-500/35'
+                    : 'bg-red-950/40 border-red-500/50'
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    {activeCoiResult.overallPassed ? (
+                      <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                    ) : (
+                      <ShieldAlert className="w-4 h-4 text-red-400" />
+                    )}
+                    <span className="text-xs font-semibold text-white">
+                      Automated 5-Signal Conflict-of-Interest Check for: {activeActor.displayName}
+                    </span>
+                  </div>
+                  <span
+                    className={`text-xs font-mono-tabular font-semibold ${
+                      activeCoiResult.overallPassed ? 'text-emerald-400' : 'text-red-400'
+                    }`}
+                  >
+                    {activeCoiResult.overallPassed ? 'ALL 5 COI SIGNALS PASSED' : 'CONFLICT DETECTED — BLOCKED'}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                  {activeCoiResult.signals.map((sig, i) => (
+                    <div
+                      key={i}
+                      className="p-2.5 rounded bg-[#121214] border border-white/10 flex items-start gap-2"
+                    >
+                      {sig.passed ? (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
+                      ) : (
+                        <XCircle className="w-3.5 h-3.5 text-red-400 shrink-0 mt-0.5" />
+                      )}
+                      <div>
+                        <div className="font-medium text-white">{sig.signalName}</div>
+                        <div className="text-[11px] text-[#A1A1AA] mt-0.5">{sig.detail}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Evidence Artifacts in Private Vault */}
+              <div className="space-y-3">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-[#C9A86A]">
+                  Private Evidence Vault Artifacts (Short-TTL Signed Access · Residential Coordinates Masked)
+                </h3>
+                <div className="grid grid-cols-1 gap-3">
+                  {selectedSubmission.evidenceArtifacts.map((art) => (
+                    <div
+                      key={art.id}
+                      className="p-3.5 rounded-xl bg-[#18181B] border border-white/10 text-xs space-y-1.5"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-semibold text-white">
+                          [{art.type}] {art.fileName}
+                        </span>
+                        <span className="font-mono-tabular text-[11px] text-[#C9A86A]">
+                          Post-Upload SHA-256: {art.sha256PostUploadDigest.slice(0, 24)}...
+                        </span>
+                      </div>
+                      <div className="text-[#A1A1AA] flex flex-wrap items-center gap-2">
+                        {art.extractedMetadata.deviceModel && (
+                          <span>Sensor: {art.extractedMetadata.deviceModel}</span>
+                        )}
+                        {art.extractedMetadata.recordedMaxElevationM && (
+                          <span>
+                            · Max Elev: {art.extractedMetadata.recordedMaxElevationM}m (Apex dist:{' '}
+                            {art.extractedMetadata.distanceSummitedFromApexM}m)
+                          </span>
+                        )}
+                        {art.extractedMetadata.rolling15mMaxAscentMPerHr && (
+                          <span>
+                            · 15m Ascent: {art.extractedMetadata.rolling15mMaxAscentMPerHr} m/hr
+                          </span>
+                        )}
+                        {art.extractedMetadata.permitReferenceCode && (
+                          <span>· Permit Ref: {art.extractedMetadata.permitReferenceCode}</span>
+                        )}
+                        {art.perceptualHash && <span>· {art.perceptualHash}</span>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Advisory AI Forensic Panel (Strictly Non-Decisional) */}
+              <div className="p-4 rounded-xl bg-[#18181B] border border-[#C9A86A]/30 space-y-2.5 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-[#FFD700]" />
+                    <span className="font-semibold text-white">
+                      Advisory AI Forensic Pre-Screening (Risk Flag: {selectedSubmission.advisoryAiAssessment.advisoryRiskLevel})
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleRequestServerAiBrief}
+                    disabled={aiBriefLoading}
+                    className="px-3 py-1 rounded bg-[#121214] border border-[#C9A86A]/40 text-[#FFD700] hover:border-[#FFD700] transition-colors whitespace-nowrap shrink-0"
+                  >
+                    {aiBriefLoading ? 'Querying Server...' : 'Run Server Advisory Forensic Brief'}
+                  </button>
+                </div>
+                <p className="text-neutral-300">
+                  <strong>Kinematic Analysis:</strong>{' '}
+                  {selectedSubmission.advisoryAiAssessment.kinematicConsistencyNote}
+                </p>
+                <p className="text-neutral-300">
+                  <strong>EXIF & Provenance:</strong>{' '}
+                  {selectedSubmission.advisoryAiAssessment.exifForensicNote}
+                </p>
+                {aiBriefText && (
+                  <div className="p-3 rounded bg-[#121214] border border-[#FFD700]/30 text-[#FFD700]">
+                    {aiBriefText}
+                  </div>
+                )}
+                <p className="text-[11px] font-mono-tabular text-[#C9A86A]">
+                  {selectedSubmission.advisoryAiAssessment.disclaimer}
+                </p>
+              </div>
+
+              {/* Appeal Tribunal Box (If Submission is APPEALED) */}
+              {selectedSubmission.appealRecord && (
+                <div className="p-4 rounded-xl bg-amber-950/30 border border-amber-500/40 space-y-2 text-xs">
+                  <div className="font-semibold text-amber-300">
+                    Independent Appeal Tribunal Record ({selectedSubmission.appealRecord.appealId})
+                  </div>
+                  <p className="text-neutral-200">
+                    <strong>Appellant Grounds:</strong> {selectedSubmission.appealRecord.appellantGrounds}
+                  </p>
+                  <p className="text-neutral-300">
+                    <strong>Supplementary Evidence:</strong>{' '}
+                    {selectedSubmission.appealRecord.supplementaryEvidenceSummary}
+                  </p>
+                  <p className="font-mono-tabular text-amber-400">
+                    Original Reviewer Hard-Blocked from Appeal Tribunal:{' '}
+                    {selectedSubmission.appealRecord.originalReviewerUserIdsBlocked.join(', ')}
+                  </p>
+                </div>
+              )}
+
+              {/* Prior Human Reviews Log */}
+              {selectedSubmission.humanReviews.length > 0 && (
+                <div className="space-y-2 text-xs">
+                  <h4 className="font-semibold text-[#A1A1AA]">
+                    Recorded Human Officer Decisions ({selectedSubmission.humanReviews.length})
+                  </h4>
+                  {selectedSubmission.humanReviews.map((rev) => (
+                    <div
+                      key={rev.reviewId}
+                      className="p-3 rounded-lg bg-[#18181B] border border-white/10 space-y-1"
+                    >
+                      <div className="flex items-center justify-between font-mono-tabular">
+                        <span className="text-[#FFD700]">
+                          {rev.reviewerOfficerCode} ({rev.reviewerRole})
+                        </span>
+                        <span>{rev.decision}</span>
+                      </div>
+                      <p className="text-neutral-300">{rev.humanRationale}</p>
+                      <p className="text-[10px] font-mono-tabular text-[#A1A1AA]">
+                        Signed: {rev.decidedAtUtc} · {rev.decisionHmacSignature}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Human Decision Execution Form */}
+              <div className="pt-4 border-t border-white/10 space-y-4 text-xs">
+                <label className="flex items-start gap-2.5 p-3 rounded-lg bg-[#18181B] border border-white/15 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={coiAttestedByOfficer}
+                    onChange={(e) => setCoiAttestedByOfficer(e.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span className="text-neutral-200">
+                    <strong>Mandatory Officer Attestation ({activeActor.officerCode}):</strong> I confirm I have no personal, financial, guiding, or organizational conflict of interest with this applicant, and I have personally inspected the corroborating evidence.
+                  </span>
+                </label>
+
+                <label className="space-y-1 block">
+                  <span className="text-[#A1A1AA]">
+                    Human Verification / Appeal Rationale (Logged to Append-Only WORM Audit Trail)
+                  </span>
+                  <textarea
+                    rows={2}
+                    value={reviewRationaleInput}
+                    onChange={(e) => setReviewRationaleInput(e.target.value)}
+                    className="w-full bg-[#18181B] border border-white/15 rounded-lg p-2.5 text-white"
+                  />
+                </label>
+
+                {selectedSubmission.status === 'APPEALED' ? (
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => handleExecuteHumanDecision('OVERTURN_AND_APPROVE')}
+                      className="px-4 py-2.5 rounded-lg font-semibold bg-emerald-500 text-[#0A0A0A] hover:bg-emerald-400 transition-colors"
+                    >
+                      Appeal Tribunal: Overturn Rejection & Approve Achievement
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleExecuteHumanDecision('UPHOLD_REJECTION')}
+                      className="px-4 py-2.5 rounded-lg font-semibold bg-red-600 text-white hover:bg-red-500 transition-colors"
+                    >
+                      Appeal Tribunal: Uphold Original Rejection
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => handleExecuteHumanDecision('APPROVE')}
+                      className="px-4 py-2.5 rounded-lg font-semibold bg-[#C9A86A] text-[#0A0A0A] hover:bg-[#FFD700] transition-colors"
+                    >
+                      Record Human Verification Approval ({activeActor.officerCode})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleExecuteHumanDecision('REJECT')}
+                      className="px-4 py-2.5 rounded-lg font-semibold bg-red-900/80 border border-red-500/50 text-red-100 hover:bg-red-800 transition-colors"
+                    >
+                      Reject Submission with Structured Reason
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
+        )}
+
+        {/* ===================================================================
+            SECTION 4: PUBLIC QR/ID VERIFICATION REGISTRY & VERIFIED LEADERBOARDS (PHASES 13 & 14)
+        =================================================================== */}
+        {activeSection === 'CERTIFICATES_STANDINGS' && (
+          <div className="space-y-12">
+            {/* Public Verification Lookup Portal */}
+            <section className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+              <div className="lg:col-span-5 bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-5">
+                <div>
+                  <p className="text-xs text-[#C9A86A] font-mono-tabular">
+                    PHASE 13 · NON-ENUMERABLE 128-BIT PUBLIC VERIFICATION REGISTRY
+                  </p>
+                  <h2 className="font-display text-2xl font-bold text-white mt-1">
+                    Verify Public Achievement Credential
+                  </h2>
+                  <p className="text-xs text-[#A1A1AA] mt-1">
+                    Enter or select a cryptographic Verification ID. Public pages respect holder privacy consent and never expose raw GPX files or personal documents.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs text-[#A1A1AA] block">
+                    Enter Cryptographic Verification ID
+                  </label>
+                  <input
+                    type="text"
+                    value={verifyLookupId}
+                    onChange={(e) => setVerifyLookupId(e.target.value)}
+                    className="w-full bg-[#18181B] border border-[#C9A86A]/40 rounded-lg px-3.5 py-2.5 text-sm font-mono-tabular text-[#FFD700] focus:outline-none focus:border-[#FFD700]"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <p className="text-xs text-[#A1A1AA]">
+                    Quick-Select Registry Records ({certificates.length}):
+                  </p>
+                  <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1">
+                    {certificates.map((cert) => (
+                      <button
+                        key={cert.verificationId}
+                        type="button"
+                        onClick={() => setVerifyLookupId(cert.verificationId)}
+                        className={`w-full text-left p-2.5 rounded-lg border text-xs flex items-center justify-between gap-2 transition-colors ${
+                          verifyLookupId === cert.verificationId
+                            ? 'bg-[#C9A86A]/15 border-[#FFD700] text-white'
+                            : 'bg-[#18181B] border-white/10 text-[#A1A1AA] hover:text-white'
+                        }`}
+                      >
+                        <span className="font-mono-tabular truncate">{cert.verificationId}</span>
+                        <span
+                          className={`font-mono-tabular shrink-0 ${
+                            cert.status === 'VALID' ? 'text-emerald-400' : 'text-red-400'
+                          }`}
+                        >
+                          {cert.status}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Official Public Certificate Dossier View */}
+              <div className="lg:col-span-7">
+                {lookedUpCertificate ? (
+                  <div className="bg-[#121214] border-2 border-[#C9A86A] rounded-2xl p-8 space-y-6 relative">
+                    <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[#C9A86A]/30 pb-5">
+                      <div>
+                        <p className="text-xs tracking-widest uppercase text-[#C9A86A] font-mono-tabular">
+                          0 TO 8848 · OFFICIAL VERIFIED ACHIEVEMENT CERTIFICATE
+                        </p>
+                        <h3 className="font-display text-2xl sm:text-3xl font-bold text-white mt-1">
+                          {lookedUpCertificate.destinationNameEn}
+                        </h3>
+                        {lookedUpCertificate.destinationNameNe && (
+                          <p className="font-nepali text-base text-[#FFD700] mt-0.5">
+                            {lookedUpCertificate.destinationNameNe}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="text-right font-mono-tabular">
+                        <span
+                          className={`text-sm font-bold ${
+                            lookedUpCertificate.status === 'VALID'
+                              ? 'text-emerald-400'
+                              : 'text-red-400'
+                          }`}
+                        >
+                          STATUS: {lookedUpCertificate.status}
+                        </span>
+                        <p className="text-xs text-[#A1A1AA] mt-0.5">
+                          {lookedUpCertificate.verificationId}
+                        </p>
+                      </div>
+                    </div>
+
+                    {lookedUpCertificate.revocationOrCorrectionNote && (
+                      <div className="p-4 rounded-xl bg-red-950/60 border border-red-500/50 text-xs text-red-200">
+                        {lookedUpCertificate.revocationOrCorrectionNote}
+                      </div>
+                    )}
+
+                    <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                      <div className="p-3.5 rounded-lg bg-[#18181B] border border-white/10">
+                        <dt className="text-[#A1A1AA]">Credential Holder (Consent Mode: {lookedUpCertificate.holderPrivacyMode})</dt>
+                        <dd className="text-base font-semibold text-white mt-1">
+                          {lookedUpCertificate.holderPublicDisplay}
+                        </dd>
+                        <dd className="text-[#A1A1AA] mt-0.5">
+                          Nationality: {lookedUpCertificate.holderNationality}
+                        </dd>
+                      </div>
+
+                      <div className="p-3.5 rounded-lg bg-[#18181B] border border-white/10">
+                        <dt className="text-[#A1A1AA]">Verified Elevation & Survey Source</dt>
+                        <dd className="text-base font-bold text-[#FFD700] font-mono-tabular mt-1">
+                          {lookedUpCertificate.verifiedElevationM.toLocaleString()} m /{' '}
+                          {lookedUpCertificate.verifiedElevationFt.toLocaleString()} ft
+                        </dd>
+                        <dd className="text-[#A1A1AA] mt-0.5 line-clamp-1">
+                          {lookedUpCertificate.elevationSourceCitation}
+                        </dd>
+                      </div>
+
+                      <div className="p-3.5 rounded-lg bg-[#18181B] border border-white/10">
+                        <dt className="text-[#A1A1AA]">Canonical Route & Evidentiary Basis</dt>
+                        <dd className="text-white font-medium mt-1">
+                          {lookedUpCertificate.routeName}
+                        </dd>
+                        <dd className="text-[#C9A86A] font-mono-tabular mt-0.5">
+                          Track: {lookedUpCertificate.verificationTrack}
+                        </dd>
+                      </div>
+
+                      <div className="p-3.5 rounded-lg bg-[#18181B] border border-white/10">
+                        <dt className="text-[#A1A1AA]">Completion Date & Human Review Seal</dt>
+                        <dd className="text-white font-mono-tabular font-medium mt-1">
+                          Completed: {lookedUpCertificate.publicCompletionDateDisplay}
+                        </dd>
+                        <dd className="text-emerald-400 font-mono-tabular mt-0.5">
+                          Signed: {lookedUpCertificate.reviewingOfficersCodes.join(' + ')}
+                        </dd>
+                      </div>
+                    </dl>
+
+                    <div className="pt-4 border-t border-white/10 flex flex-wrap items-center justify-between gap-4 text-xs text-[#A1A1AA]">
+                      <div className="font-mono-tabular">
+                        Integrity Digest: {lookedUpCertificate.certificateIntegrityDigest.slice(0, 32)}...
+                      </div>
+                      {lookedUpCertificate.status === 'VALID' && (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleCertificateLifecycleAction(
+                                lookedUpCertificate,
+                                'GDPR_USER_ERASURE_SHRED'
+                              )
+                            }
+                            className="px-3 py-1.5 rounded bg-[#18181B] border border-white/15 text-neutral-300 hover:text-white transition-colors"
+                          >
+                            Simulate GDPR Key-Shredding Erasure (Correction 2.5)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleCertificateLifecycleAction(
+                                lookedUpCertificate,
+                                'DUAL_CONTROL_REVOKE'
+                              )
+                            }
+                            className="px-3 py-1.5 rounded bg-red-950/70 border border-red-500/40 text-red-200 hover:bg-red-900 transition-colors"
+                          >
+                            Execute Dual-Control Revocation
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="bg-[#121214] border border-white/10 rounded-2xl p-8 text-center space-y-2">
+                    <p className="text-base font-semibold text-white">
+                      No matching certificate found for ID: {verifyLookupId}
+                    </p>
+                    <p className="text-xs text-[#A1A1AA]">
+                      Verification IDs use non-enumerable 128-bit Base32 tokens. Select a valid ID from the registry list on the left.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </section>
+
+            {/* Verified Achievement Leaderboards (Phase 14) */}
+            <section className="bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/10 pb-4">
+                <div>
+                  <p className="text-xs text-[#C9A86A] font-mono-tabular">
+                    PHASE 14 · DETERMINISTIC VERIFIED LEADERBOARDS (ZERO PAID RANKINGS)
+                  </p>
+                  <h2 className="font-display text-xl font-bold text-white mt-1">
+                    Global Verified Adventurer Standings
+                  </h2>
+                  <p className="text-xs text-[#A1A1AA] mt-0.5">
+                    Computed 100% from VALID human-verified certificates where the holder opted in. Revoked or erased records are automatically excluded.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-1.5 bg-[#18181B] p-1 rounded-lg border border-white/10">
+                  {(
+                    [
+                      ['ELEVATION_SUM', 'Cumulative Elevation'],
+                      ['VERIFIED_COUNT', 'Verified Ascent Count'],
+                      ['HIGHEST_APEX', 'Highest Verified Apex'],
+                    ] as ['ELEVATION_SUM' | 'VERIFIED_COUNT' | 'HIGHEST_APEX', string][]
+                  ).map(([mKey, label]) => (
+                    <button
+                      key={mKey}
+                      type="button"
+                      onClick={() => setLeaderboardMetric(mKey)}
+                      className={`px-3 py-1.5 rounded text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                        leaderboardMetric === mKey
+                          ? 'bg-[#C9A86A] text-[#0A0A0A] font-semibold'
+                          : 'text-[#A1A1AA] hover:text-white'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead className="bg-[#18181B] text-[#A1A1AA] uppercase text-[11px]">
+                    <tr>
+                      <th className="py-3 px-4">Rank</th>
+                      <th className="py-3 px-4">Verified Adventurer</th>
+                      <th className="py-3 px-4">Nationality</th>
+                      <th className="py-3 px-4">Earned Destination Badges</th>
+                      <th className="py-3 px-4 text-right">Verified Count</th>
+                      <th className="py-3 px-4 text-right">Highest Apex</th>
+                      <th className="py-3 px-4 text-right">Cumulative Elevation</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/10">
+                    {verifiedLeaderboardRows.map((row, index) => (
+                      <tr key={row.holderUserId} className="hover:bg-white/5">
+                        <td className="py-3 px-4 font-mono-tabular font-bold text-[#FFD700]">
+                          #{index + 1}
+                        </td>
+                        <td className="py-3 px-4 font-semibold text-white">{row.displayName}</td>
+                        <td className="py-3 px-4 text-[#A1A1AA]">{row.nationality}</td>
+                        <td className="py-3 px-4 text-[#C9A86A]">{row.badges.join(' · ')}</td>
+                        <td className="py-3 px-4 text-right font-mono-tabular text-white">
+                          {row.verifiedCount}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono-tabular text-white">
+                          {formatElev(row.highestApexM)}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono-tabular font-semibold text-[#FFD700]">
+                          {formatElev(row.cumulativeElevationM)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+        )}
+
+        {/* ===================================================================
+            SECTION 5: GOVERNANCE COMMAND, RBAC TESTER, HARD LOCKS & 21 PHASES
+        =================================================================== */}
+        {activeSection === 'GOVERNANCE_PHASES' && (
+          <div className="space-y-12">
+            {/* Interactive 1,680-Permutation RBAC Matrix Tester & Hard-Lock Verifier */}
+            <section className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+              <div className="lg:col-span-6 bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-5">
+                <div>
+                  <p className="text-xs text-[#C9A86A] font-mono-tabular">
+                    PHASE 07 & DOC-P01-08 · 15-ROLE × 14-RESOURCE × 8-VERB RBAC ENGINE
+                  </p>
+                  <h2 className="font-display text-xl font-bold text-white mt-1">
+                    Interactive Permission & Firewall Matrix Tester
+                  </h2>
+                  <p className="text-xs text-[#A1A1AA] mt-1">
+                    Test any combination of User Role, Platform Resource, and Action Verb (`Read`, `Create`, `Update`, `Delete`, `Approve`, `Reject`, `Publish`, `Revoke`).
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                  <label className="space-y-1 block">
+                    <span className="text-[#A1A1AA]">1. Select User Role</span>
+                    <select
+                      value={testRole}
+                      onChange={(e) => setTestRole(e.target.value as UserRole)}
+                      className="w-full bg-[#18181B] border border-white/15 rounded px-2.5 py-2 text-white"
+                    >
+                      <option value="PUBLIC_VISITOR">PUBLIC_VISITOR</option>
+                      <option value="REGISTERED_ADVENTURER">REGISTERED_ADVENTURER</option>
+                      <option value="PREMIUM_MEMBER_FUTURE">PREMIUM_MEMBER_FUTURE</option>
+                      <option value="VERIFIED_GUIDE">VERIFIED_GUIDE</option>
+                      <option value="ORGANIZATION_ADMIN">ORGANIZATION_ADMIN</option>
+                      <option value="DESTINATION_PARTNER">DESTINATION_PARTNER</option>
+                      <option value="SPONSOR_ACCOUNT">SPONSOR_ACCOUNT</option>
+                      <option value="DESTINATION_RESEARCHER">DESTINATION_RESEARCHER</option>
+                      <option value="VERIFICATION_OFFICER">VERIFICATION_OFFICER</option>
+                      <option value="SENIOR_VERIFICATION_LEAD">SENIOR_VERIFICATION_LEAD</option>
+                      <option value="APPEAL_OFFICER">APPEAL_OFFICER</option>
+                      <option value="SECURITY_COMPLIANCE_OFFICER">SECURITY_COMPLIANCE_OFFICER</option>
+                      <option value="PLATFORM_SYSADMIN">PLATFORM_SYSADMIN</option>
+                      <option value="GOVERNANCE_COMMITTEE">GOVERNANCE_COMMITTEE</option>
+                      <option value="FOUNDER">FOUNDER</option>
+                    </select>
+                  </label>
+
+                  <label className="space-y-1 block">
+                    <span className="text-[#A1A1AA]">2. Select Resource</span>
+                    <select
+                      value={testResource}
+                      onChange={(e) => setTestResource(e.target.value as ResourceDomain)}
+                      className="w-full bg-[#18181B] border border-white/15 rounded px-2.5 py-2 text-white"
+                    >
+                      <option value="VERIFICATION_DECISIONS">VERIFICATION_DECISIONS</option>
+                      <option value="APPEAL_TRIBUNAL_DECISIONS">APPEAL_TRIBUNAL_DECISIONS</option>
+                      <option value="APPEND_ONLY_AUDIT_LOGS">APPEND_ONLY_AUDIT_LOGS</option>
+                      <option value="PRIVATE_EVIDENCE_VAULT">PRIVATE_EVIDENCE_VAULT</option>
+                      <option value="DRAFT_RESEARCH_DESTINATIONS_STAGES_1_4">
+                        DRAFT_DESTINATIONS_STAGES_1_4
+                      </option>
+                      <option value="BADGES_AND_CERTIFICATES">BADGES_AND_CERTIFICATES</option>
+                      <option value="PUBLIC_DESTINATIONS_STAGE_5">PUBLIC_DESTINATIONS_STAGE_5</option>
+                      <option value="VERIFIED_LEADERBOARDS">VERIFIED_LEADERBOARDS</option>
+                    </select>
+                  </label>
+
+                  <label className="space-y-1 block">
+                    <span className="text-[#A1A1AA]">3. Select Action Verb</span>
+                    <select
+                      value={testVerb}
+                      onChange={(e) => setTestVerb(e.target.value as ActionVerb)}
+                      className="w-full bg-[#18181B] border border-white/15 rounded px-2.5 py-2 text-white"
+                    >
+                      <option value="READ">READ</option>
+                      <option value="CREATE">CREATE</option>
+                      <option value="UPDATE">UPDATE</option>
+                      <option value="DELETE">DELETE</option>
+                      <option value="APPROVE">APPROVE</option>
+                      <option value="REJECT">REJECT</option>
+                      <option value="PUBLISH">PUBLISH</option>
+                      <option value="REVOKE">REVOKE</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div
+                  className={`p-4 rounded-xl border text-xs space-y-1.5 ${
+                    currentRbacEvaluation.allowed
+                      ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
+                      : 'bg-red-950/40 border-red-500/40 text-red-200'
+                  }`}
+                >
+                  <div className="flex items-center justify-between font-mono-tabular font-bold">
+                    <span>
+                      Decision: {currentRbacEvaluation.allowed ? 'HTTP 200 ALLOW' : 'HTTP 403 DENY'}
+                    </span>
+                    <span>{currentRbacEvaluation.ruleCode}</span>
+                  </div>
+                  <div className="font-semibold text-white">
+                    Qualifier: {currentRbacEvaluation.qualifier}
+                  </div>
+                  <p className="text-neutral-300 leading-relaxed">
+                    {currentRbacEvaluation.explanation}
+                  </p>
+                </div>
+              </div>
+
+              {/* Phase 17 Payment & Phase 18 Blockchain Hard-Lock Gate Verifier */}
+              <div className="lg:col-span-6 bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-5">
+                <div>
+                  <p className="text-xs text-[#C9A86A] font-mono-tabular">
+                    PHASES 17 & 18 · CONSTITUTIONAL HARD-LOCK GATE VERIFICATION
+                  </p>
+                  <h2 className="font-display text-xl font-bold text-white mt-1">
+                    Payment & Blockchain Hard-Disable Controls
+                  </h2>
+                  <p className="text-xs text-[#A1A1AA] mt-1">
+                    Verify server-side enforcement that all payment collection and optional blockchain minting remain disabled until formal legal, financial, and security approvals are recorded.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                  <div className="p-4 rounded-xl bg-[#18181B] border border-white/10 space-y-2">
+                    <div className="flex items-center justify-between font-mono-tabular">
+                      <span className="text-white font-semibold">PAYMENTS_ENABLED</span>
+                      <span className="text-red-400 font-bold">FALSE (LOCKED)</span>
+                    </div>
+                    <p className="text-[#A1A1AA]">
+                      Requires company registration, legal review, financial compliance, payment-provider approval, and PCI security readiness.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => handleTestHardLockedEndpoint('payments')}
+                      className="w-full py-2 px-3 rounded bg-[#121214] border border-[#C9A86A]/40 text-[#FFD700] hover:border-[#FFD700] font-medium transition-colors"
+                    >
+                      Test POST /api/v1/payments/checkout
+                    </button>
+                  </div>
+
+                  <div className="p-4 rounded-xl bg-[#18181B] border border-white/10 space-y-2">
+                    <div className="flex items-center justify-between font-mono-tabular">
+                      <span className="text-white font-semibold">BLOCKCHAIN_MINTING</span>
+                      <span className="text-red-400 font-bold">FALSE (LOCKED)</span>
+                    </div>
+                    <p className="text-[#A1A1AA]">
+                      Primary database is authoritative. Requires legal approval, smart contract audit, and formal Founder authorization.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => handleTestHardLockedEndpoint('blockchain')}
+                      className="w-full py-2 px-3 rounded bg-[#121214] border border-[#C9A86A]/40 text-[#FFD700] hover:border-[#FFD700] font-medium transition-colors"
+                    >
+                      Test POST /api/v1/blockchain/mint
+                    </button>
+                  </div>
+                </div>
+
+                {gateTestMessage && (
+                  <div className="p-3.5 rounded-xl bg-[#18181B] border border-[#FFD700]/40 font-mono-tabular text-xs text-[#FFD700]">
+                    {gateTestMessage}
+                  </div>
+                )}
+              </div>
+            </section>
+
+            {/* Append-Only WORM Audit Trail Explorer (Correction 2.3) */}
+            <section className="bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/10 pb-4">
+                <div>
+                  <p className="text-xs text-[#C9A86A] font-mono-tabular">
+                    CORRECTION 2.3 · WRITE-ONCE-READ-MANY (WORM) APPEND-ONLY AUDIT LEDGER
+                  </p>
+                  <h2 className="font-display text-xl font-bold text-white mt-1">
+                    Tamper-Resistant Governance & Verification Audit Log
+                  </h2>
+                  <p className="text-xs text-[#A1A1AA] mt-0.5">
+                    Application service account holds INSERT-only privileges (zero UPDATE/DELETE/TRUNCATE) + sequential HMAC chaining + out-of-band WORM replication.
+                  </p>
+                </div>
+                <span className="text-xs font-mono-tabular text-emerald-400">
+                  Chain Integrity: {auditEvents.length} Sequential Events Verified
+                </span>
+              </div>
+
+              <div className="space-y-2.5 max-h-80 overflow-y-auto pr-1">
+                {auditEvents.map((evt) => (
+                  <div
+                    key={evt.eventId}
+                    className="p-3.5 rounded-xl bg-[#18181B] border border-white/10 text-xs space-y-1"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2 font-mono-tabular">
+                      <span className="text-[#FFD700] font-semibold">
+                        #{evt.sequenceNumber} · {evt.eventId} · {evt.actionType}
+                      </span>
+                      <span className="text-[#A1A1AA]">
+                        {evt.timestampUtc} · Role: {evt.actorRole} · WORM: {evt.wormReplicated ? 'LOCKED' : 'PENDING'}
+                      </span>
+                    </div>
+                    <p className="text-white">{evt.summary}</p>
+                    <div className="text-[11px] font-mono-tabular text-[#A1A1AA] truncate">
+                      Prev HMAC: {evt.previousEventHmac.slice(0, 28)}... → Curr HMAC: {evt.currentEventHmac}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            {/* Exact 21-Phase Master Roadmap Browser */}
+            <section className="bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-5">
+              <div className="border-b border-white/10 pb-4">
+                <p className="text-xs text-[#C9A86A] font-mono-tabular">
+                  MASTER ROADMAP · EXACTLY 21 MAIN PHASES PRESERVED
+                </p>
+                <h2 className="font-display text-xl font-bold text-white mt-1">
+                  0 TO 8848 — 21-Phase Master Implementation & Governance Roadmap
+                </h2>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {MASTER_21_PHASES.map((ph) => (
+                  <div
+                    key={ph.phaseNumber}
+                    className="p-4 rounded-xl bg-[#18181B] border border-white/10 flex flex-col justify-between space-y-3 text-xs"
+                  >
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between font-mono-tabular">
+                        <span className="text-[#FFD700] font-bold">{ph.code}</span>
+                        <span
+                          className={
+                            ph.status === 'APPROVED_BASELINE'
+                              ? 'text-emerald-400'
+                              : ph.status === 'HARD_LOCKED_GATE'
+                              ? 'text-red-400'
+                              : 'text-[#C9A86A]'
+                          }
+                        >
+                          {ph.status}
+                        </span>
+                      </div>
+                      <h3 className="font-display text-sm font-bold text-white">{ph.title}</h3>
+                      <p className="text-[#A1A1AA] leading-relaxed">{ph.purpose}</p>
+                    </div>
+
+                    <div className="pt-2 border-t border-white/10 space-y-1 text-[11px]">
+                      <div className="text-neutral-300">
+                        <strong>Modules:</strong> {ph.modules.join(' · ')}
+                      </div>
+                      <div className="text-[#C9A86A]">
+                        <strong>Security:</strong> {ph.securityControls}
+                      </div>
+                      <div className="text-[#A1A1AA]">
+                        <strong>Gate:</strong> {ph.acceptanceCriteria}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </div>
+        )}
+      </main>
+
+      {/* =====================================================================
+          CLEAN INSTITUTIONAL FOOTER (No Fake Telemetry Tickers)
+      ===================================================================== */}
+      <footer className="bg-[#0A0A0A] border-t border-white/10 px-6 py-8 mt-12 text-xs text-[#A1A1AA]">
+        <div className="max-w-[1400px] mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <p className="font-display text-sm font-bold text-white">
+              0 TO 8848 — Global Adventure Achievement Platform
+            </p>
+            <p>
+              EXPLORE. ACHIEVE. PROVE. · BUILT IN NEPAL. MADE FOR THE WORLD. · https://0to8848official.com
+            </p>
+          </div>
+          <div className="text-left sm:text-right space-y-1">
+            <p className="text-[#C9A86A] font-medium">
+              TRUST FIRST. SUSTAINABLE REVENUE SECOND. ACHIEVEMENTS MUST BE EARNED, NEVER BOUGHT.
+            </p>
+            <p>
+              Standard Digital Badges & Approved Certificates are Permanently Free · Independent Human Verification Department
+            </p>
+          </div>
+        </div>
+      </footer>
+    </div>
+  );
+}
