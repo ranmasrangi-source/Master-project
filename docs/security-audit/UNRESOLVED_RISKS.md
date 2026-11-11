@@ -1,32 +1,21 @@
-# 0 TO 8848 — UNRESOLVED RISKS & HONEST ARCHITECTURAL BOUNDARIES
+# 0 TO 8848 — RESIDUAL & INFRASTRUCTURE RISKS REGISTER
 
-**Project:** 0 TO 8848 — Global Adventure Achievement Platform  
-**Repository:** `ranmasrangi-source/Master-project`  
-
----
-
-## 1. Status of Audited P0 & P1 Security Bugs
-
-- **Confirmed P0 Bugs Remaining Open:** **0** (`BUG-P0-001`, `BUG-P0-002`, and `BUG-P0-003` are 100% resolved and verified by automated tests).
-- **Confirmed P1 Bugs Remaining Open:** **0** (`BUG-P1-004`, `BUG-P1-005`, and `BUG-P1-006` are 100% resolved and verified by automated tests).
+**Project:** 0 TO 8848 — Global Adventure Achievement Platform (`https://0to8848official.com`)  
+**Branch:** `security/remediate-bug01-bug10`  
 
 ---
 
-## 2. Honest Infrastructure & Environment Boundaries (Non-Fabrication Disclosure)
+## Honest Disclosure of Infrastructure-Dependent Controls
 
-In strict compliance with the Founder's directive against exaggerating local container capabilities as cloud infrastructure:
+All 10 code-level security and reliability bugs (`BUG-01` through `BUG-10`) are resolved and tested. In accordance with the project's strict non-fabrication policy, the following production cloud infrastructure items remain environment-dependent at deployment time:
 
-1. **Single-Node SQLite vs. Distributed Cloud PostgreSQL & WORM Object Lock:**
-   - **Current Implementation:** Persistent storage uses Node's built-in `node:sqlite` (`DatabaseSync`) with WAL mode, `BEGIN IMMEDIATE` transactions, and SQLite `BEFORE UPDATE` / `BEFORE DELETE` immutability triggers (`storageMode: 'LOCAL_SQLITE_TRIGGER_IMMUTABLE'`, `wormReplicated: false`).
-   - **Residual Infrastructure Risk:** A privileged OS root user with direct filesystem write access to the SQLite file could replace the database file on disk unless audit checkpoints are replicated to an external Cloud S3/GCS WORM (Write-Once-Read-Many) Object Lock bucket in production deployment.
-
-2. **Hardware GNSS Cryptographic Signing vs. Software GPX Parsing:**
-   - **Current Implementation:** `src/server/evidenceProcessor.ts` enforces WGS84 coordinate/elevation bounds, monotonic timestamp progression, velocity/vertical-jump limits, destination ascent-rate envelopes, fake GPX creator tag detection, and EXIF editing software detection.
-   - **Residual Domain Risk:** Because consumer GPS devices (Garmin, Suunto, COROS, Apple Watch) export unsigned XML `.gpx` files rather than hardware-signed GNSS NMEA/OSNMA streams, a sophisticated adversary can still craft a synthetic GPX trajectory that obeys physical velocity and ascent-rate equations. This is why **multi-modal corroboration** (summit photography + barometric telemetry + official permit/liaison logs) and **mandatory human Verification Officer review** (dual-review for Tier-A 8,000m peaks) remain non-negotiable in the 0 TO 8848 governance model.
-
-3. **In-Memory Rate Limiter Scope:**
-   - **Current Implementation:** `loginAttemptsMap` in `src/server/auth.ts` enforces brute-force lockout (5 failed attempts -> 15-minute lockout) within the Node.js server process.
-   - **Residual Infrastructure Risk:** In a multi-instance horizontal deployment behind a load balancer, rate-limiting state should be backed by a shared Redis cluster or edge WAF rate-limiting policy.
-
-4. **Future Phases (Phases 15–21) Intentionally Locked:**
-   - Phases 15 (Community Feed), 16 (Verified Guide Marketplace), 17 (Ethical Revenue & Commerce), 18 (Optional Blockchain Anchoring), 19 (Global Multilingual Localization), 20 (SRE Chaos & Load Testing), and 21 (Global Launch Readiness) remain intentionally in `PLANNED` / `LOCKED` status per the 21-Phase Master Roadmap, with `/api/v1/payments/checkout` and `/api/v1/blockchain/mint` hard-locked (`HTTP 503`).
+1. **External Cloud WORM Object Lock Provisioning (`BUG-09`):**
+   - **Code Status:** `src/server/wormArchiveService.ts` implements authenticated `AES-256-GCM` + `HMAC-SHA256` archive bundle creation, tamper-evident recovery verification, failure alerting, and the `WormProviderTransportAdapter` interface.
+   - **Runtime Status:** Until an external AWS S3 Object Lock (COMPLIANCE mode) or GCP Bucket Lock credentials/adapter are registered in production environment variables, `getWormReplicationStatus()` and `GET /api/v1/health` honestly report `protectionLevel: "LOCAL_SQLITE_TRIGGER_IMMUTABLE"` and `wormReplicated: false`.
+2. **Multi-Instance Distributed Rate Limit Backing Store (`BUG-01`):**
+   - **Code Status:** `src/server/auth.ts` implements the pluggable `RateLimitStore` interface (`setLoginRateLimitStore`) and defaults to `BoundedInMemoryRateLimitStore` (`maxEntries = 5000`, LRU + TTL eviction) for single-node deployments.
+   - **Runtime Status:** When horizontally scaling across multiple Node.js instances behind a load balancer, operators should inject a Redis-backed `RateLimitStore` implementation and set `TRUST_PROXY=true` only behind the verified load balancer.
+3. **Production Secret Injection (`SEC-CRYPTO-001` & `BUG-06`):**
+   - **Code Status:** `validateStartupEnvironmentSecurity()` and `initializeProcessHmacKey()` enforce that `AUDIT_HMAC_SECRET_HEX` (at least 256 bits / 64 hex chars) must be provided via secret manager / environment variable when `NODE_ENV=production`.
+4. **Phase 17 (Payments) & Phase 18 (Blockchain) Constitutional Locks:**
+   - **Status:** Intentionally hard-locked at `HTTP 503` (`HARD_LOCKED_GATE`) per Founder governance directive. Standard digital badges and certificates remain permanently free.

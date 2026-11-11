@@ -6,9 +6,12 @@ import {
 } from '../data/governanceAndPhases';
 import { ActionVerb, AuthenticatedSessionUser, EvidenceArtifact } from '../types/platform';
 import {
+  buildClearSessionCookieHeader,
+  buildSessionCookieHeader,
   checkLoginRateLimit,
   recordFailedLoginAttempt,
   resetLoginAttempts,
+  resolveTrustedClientIp,
 } from './auth';
 import {
   computeSha256Hex,
@@ -19,6 +22,7 @@ import {
 import {
   advanceDestinationStageServer,
   appendAuditEvent,
+  attemptDemoSeedOperationServer,
   authenticateUserSession,
   buildScopedBootstrapPayload,
   createSubmissionServer,
@@ -30,6 +34,7 @@ import {
   getDestinationByIdOrCode,
   getEvidenceArtifactById,
   getSubmissionById,
+  isDemoProvisioningAllowed,
   listAuditEvents,
   listCertificates,
   listDestinations,
@@ -40,9 +45,18 @@ import {
   saveUploadedEvidenceArtifact,
   updateCertificatePrivacyConsentServer,
   validateSessionToken,
+  validateStartupEnvironmentSecurity,
 } from './db';
-import { ingestEvidenceFile } from './evidenceProcessor';
+import {
+  decodeAndValidateBase64Payload,
+  ingestEvidenceFile,
+  MAX_EVIDENCE_FILE_BYTES,
+  readBoundedUploadStream,
+  UPLOAD_STREAM_TIMEOUT_MS,
+} from './evidenceProcessor';
+import { getWormReplicationStatus } from './wormArchiveService';
 import { runAutomatedFiveSignalCoiCheck } from '../domain/verificationEngine';
+import { MASTER_21_PHASES } from '../data/governanceAndPhases';
 
 export const apiRouter = express.Router();
 
@@ -59,7 +73,23 @@ apiRouter.use((_req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-apiRouter.use(express.json({ limit: '5mb' }));
+// BUG-04 Remediation: 15mb JSON limit accounts for 10 MiB binary evidence + 33.3% Base64 overhead + JSON envelope
+apiRouter.use(express.json({ limit: '15mb' }));
+apiRouter.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+  if (err && (err.type === 'entity.too.large' || err.status === 413)) {
+    return res.status(413).json({
+      error: 'FILE_SIZE_LIMIT_EXCEEDED',
+      message: `Request payload exceeds the maximum allowed evidence upload size (${MAX_EVIDENCE_FILE_BYTES} decoded bytes / 15MB JSON envelope).`,
+    });
+  }
+  if (err instanceof SyntaxError && 'body' in err) {
+    return res.status(400).json({
+      error: 'MALFORMED_JSON_PAYLOAD',
+      message: 'Request body is not valid JSON.',
+    });
+  }
+  return next(err);
+});
 
 // Simple per-IP/endpoint rate limiter for public verification & AI endpoints
 const endpointRateBuckets = new Map<string, { count: number; resetAtMs: number }>();
@@ -69,6 +99,11 @@ function checkEndpointRateLimit(
   windowMs: number
 ): boolean {
   const now = Date.now();
+  if (endpointRateBuckets.size > 5000) {
+    for (const [k, v] of endpointRateBuckets.entries()) {
+      if (now > v.resetAtMs) endpointRateBuckets.delete(k);
+    }
+  }
   const bucket = endpointRateBuckets.get(key);
   if (!bucket || now > bucket.resetAtMs) {
     endpointRateBuckets.set(key, { count: 1, resetAtMs: now + windowMs });
@@ -79,22 +114,94 @@ function checkEndpointRateLimit(
 }
 
 /**
- * Extracts and validates the server-side session token from Authorization Bearer header,
- * X-Session-Token header, or Cookie header. Never trusts client-provided role strings.
+ * BUG-02 Remediation:
+ * Extracts the raw session token and identifies its source (BEARER, HEADER, or COOKIE)
+ * so both session validation and logout revocation handle cookie-only sessions identically.
  */
-function resolveSessionUser(req: Request): AuthenticatedSessionUser | null {
-  let token: string | undefined;
+export function extractRawSessionToken(req: Request): {
+  token?: string;
+  source?: 'BEARER' | 'HEADER' | 'COOKIE';
+} {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
-    token = authHeader.slice(7).trim();
-  } else if (typeof req.headers['x-session-token'] === 'string') {
-    token = req.headers['x-session-token'].trim();
-  } else if (typeof req.headers.cookie === 'string') {
+    const t = authHeader.slice(7).trim();
+    if (t) return { token: t, source: 'BEARER' };
+  }
+  if (typeof req.headers['x-session-token'] === 'string') {
+    const t = req.headers['x-session-token'].trim();
+    if (t) return { token: t, source: 'HEADER' };
+  }
+  if (typeof req.headers.cookie === 'string') {
     const match = req.headers.cookie.match(/(?:^|;\s*)0to8848_session=([^;]+)/);
-    if (match) {
-      token = decodeURIComponent(match[1]);
+    if (match && match[1]) {
+      try {
+        const decoded = decodeURIComponent(match[1].trim());
+        if (decoded) return { token: decoded, source: 'COOKIE' };
+      } catch {
+        return {};
+      }
     }
   }
+  return {};
+}
+
+/**
+ * BUG-02 Remediation:
+ * CSRF Protection Middleware for state-changing requests authenticated via Cookie.
+ * Blocks cross-origin Origin/Referer headers and simple form-encoded CSRF attacks.
+ */
+apiRouter.use((req: Request, res: Response, next: NextFunction) => {
+  const method = req.method.toUpperCase();
+  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    return next();
+  }
+
+  const extracted = extractRawSessionToken(req);
+  if (extracted.source === 'COOKIE') {
+    const originHeader = req.headers.origin || req.headers.referer;
+    if (typeof originHeader === 'string' && originHeader.trim().length > 0) {
+      try {
+        const originUrl = new URL(originHeader);
+        const reqHost = (req.headers.host || '').split(':')[0].toLowerCase();
+        const originHost = originUrl.hostname.toLowerCase();
+        const allowedHosts = new Set([
+          reqHost,
+          '0to8848official.com',
+          'www.0to8848official.com',
+          'localhost',
+          '127.0.0.1',
+        ]);
+        if (!allowedHosts.has(originHost)) {
+          return res.status(403).json({
+            error: 'CSRF_ORIGIN_MISMATCH',
+            message: `Cross-origin state-changing cookie request from "${originHost}" was blocked by CSRF protection.`,
+          });
+        }
+      } catch {
+        return res.status(403).json({
+          error: 'CSRF_INVALID_ORIGIN_HEADER',
+          message: 'Malformed Origin or Referer header on cookie-authenticated mutation.',
+        });
+      }
+    }
+
+    const contentType = (req.headers['content-type'] || '').toLowerCase();
+    if (
+      contentType.startsWith('application/x-www-form-urlencoded') ||
+      contentType.startsWith('text/plain')
+    ) {
+      return res.status(403).json({
+        error: 'CSRF_FORM_ENCODING_BLOCKED',
+        message: 'Simple form-encoded state-changing requests are blocked by CSRF protection.',
+      });
+    }
+  }
+
+  return next();
+});
+
+function resolveSessionUser(req: Request): AuthenticatedSessionUser | null {
+  const { token } = extractRawSessionToken(req);
   return validateSessionToken(token);
 }
 
@@ -139,17 +246,38 @@ function requireRbac(
   return user;
 }
 
-// 1. Health & Constitutional Gate Status
+// 1. Health, WORM Status & Runtime-Verified Constitutional Gate Status (Part 3 & BUG-09)
 apiRouter.get('/health', (_req: Request, res: Response) => {
   const dests = listDestinations();
   const audits = listAuditEvents();
   const chainCheck = verifyAuditChainIntegrity(audits);
+  const wormStatus = getWormReplicationStatus();
+  const startupCheck = validateStartupEnvironmentSecurity();
 
-  res.json({
-    status: 'OK',
+  const phase17Spec = MASTER_21_PHASES.find((p) => p.phaseNumber === 17);
+  const phase18Spec = MASTER_21_PHASES.find((p) => p.phaseNumber === 18);
+  const paymentsLocked = phase17Spec?.status === 'HARD_LOCKED_GATE';
+  const blockchainLocked = phase18Spec?.status === 'HARD_LOCKED_GATE';
+  const sponsorCannotApproveVerification = !evaluateRbacPermission(
+    'SPONSOR_ACCOUNT',
+    'VERIFICATION_DECISIONS',
+    'APPROVE'
+  ).allowed;
+
+  const isHealthy =
+    chainCheck.valid &&
+    dests.length === 100 &&
+    MASTER_21_PHASES.length === 21 &&
+    paymentsLocked &&
+    blockchainLocked &&
+    sponsorCannotApproveVerification;
+
+  res.status(isHealthy ? 200 : 503).json({
+    status: isHealthy ? 'OK' : 'DEGRADED',
     platform: '0 TO 8848 — Global Adventure Achievement Platform',
     domain: 'https://0to8848official.com',
     catalogCount: dests.length,
+    phasesCount: MASTER_21_PHASES.length,
     publishedDestinationsCount: dests.filter(
       (d) => d.researchStage === '5_PUBLISHED'
     ).length,
@@ -158,19 +286,44 @@ apiRouter.get('/health', (_req: Request, res: Response) => {
     ).length,
     auditEventsCount: audits.length,
     auditChainValid: chainCheck.valid,
+    auditProtectionLevel: wormStatus.protectionLevel,
+    wormReplicated: wormStatus.wormReplicated,
+    wormStatus: wormStatus.status,
+    demoProvisioningAllowed: isDemoProvisioningAllowed(),
+    startupSecuritySafe: startupCheck.safe,
     constitutionalInvariants: {
-      achievementsEarnedNeverBought: true,
-      standardDigitalBadgesFree: true,
+      achievementsEarnedNeverBought: sponsorCannotApproveVerification && paymentsLocked,
+      standardDigitalBadgesFree: paymentsLocked,
       humanVerificationFinalAuthority: true,
       aiStrictlyAdvisoryOnly: true,
-      paymentsEnabled: false,
-      blockchainMintingEnabled: false,
+      paymentsEnabled: !paymentsLocked,
+      blockchainMintingEnabled: !blockchainLocked,
     },
   });
 });
 
-// 2. Authentication & Session Endpoints (SEC-AUTH-001 & BUG-P0-001 Remediation)
-// Public credential/MFA directory disclosure is permanently disabled.
+apiRouter.get('/audit/worm-status', (_req: Request, res: Response) => {
+  res.json(getWormReplicationStatus());
+});
+
+apiRouter.post('/admin/demo-seed', (req: Request, res: Response) => {
+  try {
+    const sessionUser = resolveSessionUser(req);
+    const result = attemptDemoSeedOperationServer(
+      sessionUser?.internalActorUuid || 'unauthenticated-caller',
+      sessionUser?.role || 'PUBLIC_VISITOR'
+    );
+    return res.json(result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Demo seed operation rejected.';
+    return res.status(403).json({
+      error: 'DEMO_SEED_FORBIDDEN_IN_PRODUCTION',
+      message: msg,
+    });
+  }
+});
+
+// 2. Authentication & Session Endpoints (SEC-AUTH-001, BUG-P0-001, BUG-01 & BUG-02 Remediation)
 apiRouter.all('/auth/accounts', (_req: Request, res: Response) => {
   return res.status(403).json({
     error: 'PUBLIC_ACCOUNT_DIRECTORY_DISABLED',
@@ -180,75 +333,98 @@ apiRouter.all('/auth/accounts', (_req: Request, res: Response) => {
 });
 
 apiRouter.post('/auth/login', (req: Request, res: Response) => {
-  const { username, password, totpCode } = req.body as {
+  const body = (req.body || {}) as {
     username?: string;
+    usernameOrEmail?: string;
     password?: string;
     totpCode?: string;
   };
+  const rawUsername = (body.username || body.usernameOrEmail || '').trim();
+  const password = body.password;
+  const totpCode = body.totpCode;
 
-  if (!username || !password) {
+  if (!rawUsername || !password) {
     return res.status(400).json({
       error: 'MISSING_CREDENTIALS',
       message: 'Both username and password are required.',
     });
   }
 
-  const rateKey = `login:${username.toLowerCase()}`;
-  const rateCheck = checkLoginRateLimit(rateKey);
+  const clientIp = resolveTrustedClientIp(req);
+  const normalizedUser = rawUsername.toLowerCase();
+  const rateCheck = checkLoginRateLimit(normalizedUser, clientIp);
   if (!rateCheck.allowed) {
+    res.setHeader('Retry-After', String(rateCheck.retryAfterSeconds ?? 60));
     return res.status(429).json({
       error: 'AUTH_RATE_LIMITED',
+      blockedByLayer: rateCheck.blockedByLayer,
       retryAfterSeconds: rateCheck.retryAfterSeconds,
-      message: `Too many failed login attempts. Account locked for ${rateCheck.retryAfterSeconds}s.`,
+      message: `Too many failed login attempts. Please wait ${rateCheck.retryAfterSeconds}s before retrying.`,
     });
   }
 
   try {
     const result = authenticateUserSession({
-      usernameOrUserId: username,
+      usernameOrUserId: rawUsername,
       password,
       totpCode,
     });
-    resetLoginAttempts(rateKey);
+    resetLoginAttempts(normalizedUser, clientIp);
+    const isHttps =
+      req.secure ||
+      req.headers['x-forwarded-proto'] === 'https' ||
+      process.env.NODE_ENV === 'production';
     res.setHeader(
       'Set-Cookie',
-      `0to8848_session=${encodeURIComponent(
-        result.sessionToken
-      )}; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800`
+      buildSessionCookieHeader(result.sessionToken, {
+        isHttps,
+        maxAgeSeconds: 28800,
+      })
     );
     return res.json(result);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Authentication failed.';
+    if (msg.startsWith('DEMO_ACCOUNT_FORBIDDEN_IN_PRODUCTION')) {
+      recordFailedLoginAttempt(normalizedUser, clientIp);
+      return res.status(403).json({
+        error: 'DEMO_ACCOUNT_FORBIDDEN_IN_PRODUCTION',
+        message: 'Demo credentials are disabled in production.',
+      });
+    }
     if (msg.startsWith('AUTH_INVALID_CREDENTIALS')) {
-      recordFailedLoginAttempt(rateKey);
-      return res.status(401).json({ error: 'AUTH_INVALID_CREDENTIALS', message: msg });
+      recordFailedLoginAttempt(normalizedUser, clientIp);
+      return res.status(401).json({
+        error: 'AUTH_INVALID_CREDENTIALS',
+        message: 'AUTH_INVALID_CREDENTIALS: Invalid username or password.',
+      });
     }
     if (msg.startsWith('MFA_REQUIRED') || msg.startsWith('MFA_INVALID_CODE')) {
-      recordFailedLoginAttempt(rateKey);
-      return res.status(401).json({ error: 'MFA_VERIFICATION_FAILED', message: msg });
+      recordFailedLoginAttempt(normalizedUser, clientIp);
+      return res.status(401).json({
+        error: 'MFA_VERIFICATION_FAILED',
+        message: msg,
+      });
     }
-    return res.status(400).json({ error: 'AUTH_ERROR', message: msg });
+    return res.status(400).json({
+      error: 'AUTH_ERROR',
+      message: 'Authentication request could not be processed.',
+    });
   }
 });
 
 apiRouter.post('/auth/logout', (req: Request, res: Response) => {
-  const authHeader = req.headers.authorization;
-  const token =
-    authHeader && authHeader.startsWith('Bearer ')
-      ? authHeader.slice(7).trim()
-      : (req.headers['x-session-token'] as string | undefined);
+  const { token } = extractRawSessionToken(req);
+  const revoked = token ? revokeSessionToken(token) : false;
 
-  if (token) {
-    revokeSessionToken(token);
-  }
-  res.setHeader(
-    'Set-Cookie',
-    '0to8848_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'
-  );
-  res.json({ status: 'LOGGED_OUT' });
+  const isHttps =
+    req.secure ||
+    req.headers['x-forwarded-proto'] === 'https' ||
+    process.env.NODE_ENV === 'production';
+  res.setHeader('Set-Cookie', buildClearSessionCookieHeader({ isHttps }));
+  res.json({ status: 'LOGGED_OUT', sessionRevoked: revoked, revoked });
 });
 
-apiRouter.get('/auth/session', (req: Request, res: Response) => {
+apiRouter.get(['/auth/session', '/auth/me'], (req: Request, res: Response) => {
   const user = requireAuth(req, res);
   if (!user) return;
   res.json({ authenticated: true, user });
@@ -355,56 +531,104 @@ apiRouter.post(
   }
 );
 
-// 5. Real Evidence Upload, Parsing, XXE Blocking & Private Vault Signed Access (SEC-EVID-001)
-apiRouter.post('/evidence/upload', (req: Request, res: Response) => {
+// 5. Real Evidence Upload, Streaming & Base64 Bounds, XXE Blocking & Private Vault Signed Access (SEC-EVID-001 & BUG-04)
+apiRouter.post('/evidence/upload', async (req: Request, res: Response) => {
   const user = requireRbac(req, res, 'PRIVATE_EVIDENCE_VAULT', 'CREATE');
   if (!user) return;
 
-  const {
-    fileName,
-    artifactType,
-    destinationId,
-    contentBase64,
-    rawText,
-    permitReferenceCode,
-  } = req.body as {
-    fileName?: string;
-    artifactType?: EvidenceArtifact['type'];
-    destinationId?: string;
-    contentBase64?: string;
-    rawText?: string;
-    permitReferenceCode?: string;
-  };
+  const contentType = (req.headers['content-type'] || '').toLowerCase();
+  const isBinaryStream = contentType.startsWith('application/octet-stream');
 
-  if (!fileName || !artifactType || !destinationId) {
-    return res.status(400).json({
-      error: 'MISSING_EVIDENCE_PARAMETERS',
-      message: 'fileName, artifactType, and destinationId are required.',
-    });
-  }
-
-  const dest = getDestinationByIdOrCode(destinationId);
-  if (!dest) {
-    return res.status(404).json({
-      error: 'DESTINATION_NOT_FOUND',
-      message: `Destination ${destinationId} not found.`,
-    });
-  }
-
+  let fileName: string | undefined;
+  let artifactType: EvidenceArtifact['type'] | undefined;
+  let destinationId: string | undefined;
+  let permitReferenceCode: string | undefined;
   let fileBuffer: Buffer;
-  if (typeof contentBase64 === 'string' && contentBase64.length > 0) {
-    const stripped = contentBase64.replace(/^data:[^;]+;base64,/, '');
-    fileBuffer = Buffer.from(stripped, 'base64');
-  } else if (typeof rawText === 'string') {
-    fileBuffer = Buffer.from(rawText, 'utf8');
-  } else {
-    return res.status(400).json({
-      error: 'MISSING_FILE_CONTENT',
-      message: 'Either contentBase64 or rawText file payload must be provided.',
-    });
-  }
 
   try {
+    if (isBinaryStream) {
+      fileName =
+        typeof req.headers['x-file-name'] === 'string'
+          ? req.headers['x-file-name'].trim()
+          : undefined;
+      artifactType =
+        typeof req.headers['x-artifact-type'] === 'string'
+          ? (req.headers['x-artifact-type'].trim() as EvidenceArtifact['type'])
+          : undefined;
+      destinationId =
+        typeof req.headers['x-destination-id'] === 'string'
+          ? req.headers['x-destination-id'].trim()
+          : undefined;
+      permitReferenceCode =
+        typeof req.headers['x-permit-reference'] === 'string'
+          ? req.headers['x-permit-reference'].trim()
+          : undefined;
+
+      if (!fileName || !artifactType || !destinationId) {
+        return res.status(400).json({
+          error: 'MISSING_EVIDENCE_PARAMETERS',
+          message:
+            'x-file-name, x-artifact-type, and x-destination-id headers are required for binary stream uploads.',
+        });
+      }
+
+      fileBuffer = await readBoundedUploadStream(
+        req,
+        MAX_EVIDENCE_FILE_BYTES,
+        UPLOAD_STREAM_TIMEOUT_MS
+      );
+    } else {
+      const body = (req.body || {}) as {
+        fileName?: string;
+        artifactType?: EvidenceArtifact['type'];
+        destinationId?: string;
+        contentBase64?: string;
+        rawText?: string;
+        permitReferenceCode?: string;
+      };
+
+      fileName = body.fileName;
+      artifactType = body.artifactType;
+      destinationId = body.destinationId;
+      permitReferenceCode = body.permitReferenceCode;
+
+      if (!fileName || !artifactType || !destinationId) {
+        return res.status(400).json({
+          error: 'MISSING_EVIDENCE_PARAMETERS',
+          message: 'fileName, artifactType, and destinationId are required.',
+        });
+      }
+
+      if (typeof body.contentBase64 === 'string' && body.contentBase64.length > 0) {
+        fileBuffer = decodeAndValidateBase64Payload(
+          body.contentBase64,
+          MAX_EVIDENCE_FILE_BYTES
+        );
+      } else if (typeof body.rawText === 'string') {
+        const rawBytes = Buffer.byteLength(body.rawText, 'utf8');
+        if (rawBytes > MAX_EVIDENCE_FILE_BYTES) {
+          return res.status(413).json({
+            error: 'FILE_SIZE_LIMIT_EXCEEDED',
+            message: `Raw text payload (${rawBytes} bytes) exceeds maximum limit of ${MAX_EVIDENCE_FILE_BYTES} bytes.`,
+          });
+        }
+        fileBuffer = Buffer.from(body.rawText, 'utf8');
+      } else {
+        return res.status(400).json({
+          error: 'MISSING_FILE_CONTENT',
+          message: 'Either contentBase64, rawText, or binary stream payload must be provided.',
+        });
+      }
+    }
+
+    const dest = getDestinationByIdOrCode(destinationId);
+    if (!dest) {
+      return res.status(404).json({
+        error: 'DESTINATION_NOT_FOUND',
+        message: `Destination ${destinationId} not found.`,
+      });
+    }
+
     const parsedArtifact = ingestEvidenceFile({
       rawBuffer: fileBuffer,
       fileName,
@@ -417,6 +641,12 @@ apiRouter.post('/evidence/upload', (req: Request, res: Response) => {
     return res.status(201).json({ artifact: sanitizedSaved });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Evidence ingestion failed.';
+    if (msg.startsWith('FILE_SIZE_LIMIT_EXCEEDED')) {
+      return res.status(413).json({ error: 'FILE_SIZE_LIMIT_EXCEEDED', message: msg });
+    }
+    if (msg.startsWith('UPLOAD_STREAM_TIMEOUT')) {
+      return res.status(408).json({ error: 'UPLOAD_STREAM_TIMEOUT', message: msg });
+    }
     if (msg.startsWith('DUPLICATE_EVIDENCE_SHA256_DETECTED')) {
       return res.status(409).json({ error: 'DUPLICATE_EVIDENCE', message: msg });
     }

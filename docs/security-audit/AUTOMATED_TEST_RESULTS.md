@@ -1,61 +1,72 @@
-# 0 TO 8848 — AUTOMATED TEST EXECUTION RESULTS
+# 0 TO 8848 — AUTOMATED TEST & VERIFICATION RESULTS
 
-**Command Executed:** `npx --yes vitest run`  
-**Framework:** Vitest v5.1.0  
-**Total Test Suites:** 3 passed (3 total)  
-**Total Automated Tests:** 48 passed (48 total — 100% pass rate)  
+**Project:** 0 TO 8848 — Global Adventure Achievement Platform  
+**Branch:** `security/remediate-bug01-bug10`  
+**Execution Date:** 2026-11-11  
 
 ---
 
-## 1. Suite Breakdown
+## 1. Automated Vitest Suite Execution Summary
 
-### Suite 1: `src/tests/rbac1680.test.ts` (4 / 4 Passed)
-- `exhaustively evaluates all 1,680 permission cells without undefined, null, or missing metadata` — **PASS**
-- `enforces PUBLIC_VISITOR read-only public scope and denies all 107 non-public/write cells` — **PASS**
-- `enforces SPONSOR_ACCOUNT Commercial Firewall across all verification, destination, leaderboard, and badge domains` — **PASS**
-- `enforces APPEND_ONLY_AUDIT_LOGS immutability (UPDATE, DELETE, REVOKE hard-blocked for all 15 roles including FOUNDER)` — **PASS**
+Command executed:
+```bash
+NODE_ENV=test ENABLE_DEV_DEMO_PROVISIONING=true npm test
+```
 
-### Suite 2: `src/tests/foundation.test.ts` (24 / 24 Passed)
-- **Stage A — Constitutional Scope & Destination Catalog:**
-  - `preserves exactly 100 featured destinations and 21 master phases` — **PASS**
-  - `ensures all 100 static catalog entries start at 1_PROPOSED and UNPUBLISHED_DRAFT` — **PASS**
-  - `verifies SQLite initialization seeds all 100 destinations with 92 at 1_PROPOSED and 8 governance-progressed` — **PASS**
-- **SEC-CRYPTO-001 — 128-Bit CSPRNG Verification IDs:**
-  - `generates Crockford Base32 IDs with 128 bits of entropy and zero collisions across 10,000 samples` — **PASS**
-  - `retries cleanly when existsCheck reports a collision` — **PASS**
-- **SEC-CRYPTO-002 — NIST FIPS 180-4 SHA-256 & IETF RFC 4231 HMAC-SHA256:**
-  - `passes official NIST FIPS 180-4 SHA-256 known test vectors` — **PASS**
-  - `passes official IETF RFC 4231 HMAC-SHA256 known test vectors (Cases 1, 2, and 3) and supports key rotation` — **PASS**
-- **SEC-DB-001 & SEC-CRYPTO-002 — Audit-Chain Tamper Detection & SQLite Immutability Triggers:**
-  - `verifies intact HMAC-SHA256 audit chain and detects payload or chain tampering` — **PASS**
-  - `blocks SQL UPDATE and DELETE on audit_events via database triggers` — **PASS**
-  - `maintains sequential integrity across concurrent database writes` — **PASS**
-- **5-Signal COI Engine & Appeal Tribunal Independence:**
-  - `blocks self-review, guide COI, organization COI, and shared expedition roster COI` — **PASS**
-  - `blocks original rejecting reviewer from adjudicating an appeal on the same submission` — **PASS**
-- **SEC-AUTH-001 — Authentication, Scrypt Password Hashing, TOTP MFA, Sessions & Rate Limiting:**
-  - `hashes and verifies passwords with scrypt and validates RFC 6238 TOTP MFA codes` — **PASS**
-  - `requires TOTP MFA for privileged roles, issues CSPRNG sessions, and enforces brute-force rate limiting` — **PASS**
-- **SEC-GOV-001 & SEC-GOV-003 — Backend Destination Governance & Two-Person (2P) Dual-Control:**
-  - `allows Researcher to advance Stages 1 -> 2 -> 3, blocks Researcher from Stage 4, and enforces Two-Person (2P) distinct principals for Stages 4 and 5` — **PASS**
-  - `enforces Two-Person (2P) Dual-Control on Certificate Revocation` — **PASS**
-- **SEC-GOV-002 — Server-Side Human Verification, Tier-A Dual Review, Split-Decision Escalation & Appeals:**
-  - `completes Tier-A Dual-Review on sub-queue-101 with 2nd independent officer and issues free 128-bit CSPRNG certificate` — **PASS**
-  - `escalates split decisions (1 APPROVE + 1 REJECT) on Tier-A submissions to ESCALATED_SPLIT_DECISION` — **PASS**
-- **SEC-EVID-001 — GPX/EXIF/PDF Parser Security, XXE Rejection, Duplicate SHA-256 & Signed Vault URLs:**
-  - `parses valid GPX telemetry, computes real SHA-256, and masks residential start/end trackpoints within 2km` — **PASS**
-  - `rejects XML External Entity (XXE) payloads and malicious PDF /JavaScript directives` — **PASS**
-  - `validates JPEG/PNG magic bytes and rejects duplicate SHA-256 evidence uploads via /api/v1/evidence/upload` — **PASS**
-  - `enforces short-TTL HMAC-signed Private Vault tokens and blocks unauthorized or wrong-viewer access` — **PASS**
-- **SEC-PRIV-001 — AES-256-GCM PII Vault, Key-Shredding Erasure & Coordinate Masking:**
-  - `encrypts PII with per-user AES-256-GCM DEK and renders ciphertext permanently undecryptable after key-shredding erasure` — **PASS**
-  - `masks GPX points within 2.0 km of start and end coordinates while preserving summit trackpoints` — **PASS**
-- **Stage D — Phase 17 Payment & Phase 18 Blockchain Hard-Lock Regression Suite:**
-  - `returns HTTP 503 for POST /api/v1/payments/checkout and POST /api/v1/blockchain/mint` — **PASS**
+| Test Suite File | Scope Covered | Total Tests | Passed | Failed | Status |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| `src/tests/rbac1680.test.ts` | Exhaustive 15 Roles × 14 Resource Domains × 8 Action Verbs = **1,680 RBAC Permutations**, Sponsor Commercial Firewall, AI Non-Approval Invariant | 4 | 4 | 0 | **PASS** |
+| `src/tests/foundation.test.ts` | 100 Destinations Catalog, 21 Master Phases, 128-bit CSPRNG Verification IDs, NIST SHA-256 & RFC 4231 HMAC-SHA256 Vectors, SQLite Immutability Triggers, 5-Signal COI Engine, Tier-A Dual Human Review, Split-Decision Escalation, AES-256-GCM PII Key-Shredding, Phase 17/18 HTTP 503 Hard Locks | 24 | 24 | 0 | **PASS** |
+| `src/tests/securityAuditP0P1.test.ts` | `BUG-P0-001` (No Public Credential/TOTP Disclosure), `BUG-P0-002` (Unique 128-bit Salts & Unique MFA Secrets), `BUG-P0-003` (7-Tier Role-Scoped `/api/v1/bootstrap`), `BUG-P1-004` (Certificate Privacy Ownership & Advisory AI RBAC) | 20 | 20 | 0 | **PASS** |
+| `src/tests/bug01To10Remediation.test.ts` | Complete Unit & Integration Suite for **`BUG-01` through `BUG-10`** and dynamic `/api/v1/health` + `/api/v1/audit/worm-status` verification | 27 | 27 | 0 | **PASS** |
+| **TOTAL** | **All 4 Automated Security & Governance Test Suites** | **75** | **75** | **0** | **100% PASS** |
 
-### Suite 3: `src/tests/securityAuditP0P1.test.ts` (20 / 20 Passed)
-- **BUG-P0-001 (3 tests):** `/api/v1/auth/accounts` disabled (`HTTP 403`), production demo provisioning blocked (`isDemoProvisioningAllowed() === false`), 160-bit CSPRNG MFA secret generation — **PASS**
-- **BUG-P0-002 (2 tests):** Unique 128-bit CSPRNG salts per password hash, SQLite user table salt/MFA secret uniqueness verification — **PASS**
-- **BUG-P0-003 (6 tests):** All 7 `/api/v1/bootstrap` access tiers verified (`PUBLIC_INFORMATION`, `REGISTERED_ADVENTURER`, `VERIFICATION_OFFICER`, `APPEAL_REVIEW_TEAM`, `GOVERNANCE_COMMITTEE`, `FOUNDER`, `SPONSOR_ACCOUNT`) — **PASS**
-- **BUG-P1-004 (4 tests):** Cross-account appeal blocked (`HTTP 403 APPEAL_OWNERSHIP_FORBIDDEN`), cross-account certificate privacy update blocked (`HTTP 403 PRIVACY_UPDATE_FORBIDDEN`), `/api/v1/ai/advisory-brief` blocked for unauthenticated/adventurer/sponsor (`401`/`403`), `/api/v1/leaderboards` `holderUserId` redaction — **PASS**
-- **BUG-P1-005 & BUG-P1-006 (5 tests):** Production `AUDIT_HMAC_SECRET_HEX` enforcement, GPX out-of-bounds WGS84 rejection, non-monotonic timestamp & spoofing creator detection, EXIF Photoshop tampering detection, and full 2,000m residential GPX coordinate masking — **PASS**
+---
+
+## 2. Breakdown of `src/tests/bug01To10Remediation.test.ts` (27 Tests)
+
+1. **BUG-01 (5 Tests):**
+   - `isolates account+IP lockouts so an attacker on IP-A cannot lock out a legitimate user on IP-B` — **PASS**
+   - `enforces progressive lockout tiers (60s -> 300s -> 900s) and recovery after expiration` — **PASS**
+   - `enforces per-IP global throttle across multiple accounts and distributed multi-IP account anomaly limit` — **PASS**
+   - `prevents memory exhaustion with BoundedInMemoryRateLimitStore LRU/TTL eviction` — **PASS**
+   - `resolves client IP safely and ignores spoofed X-Forwarded-For unless TRUST_PROXY=true` — **PASS**
+2. **BUG-02 (3 Tests):**
+   - `sets Secure; HttpOnly; SameSite=Strict in production/HTTPS and omits Secure on plain HTTP dev` — **PASS**
+   - `revokes session in database on cookie-only POST /api/v1/auth/logout and rejects revoked cookie reuse` — **PASS**
+   - `blocks cross-origin and simple form-encoded CSRF state-changing requests when using cookie auth` — **PASS**
+3. **BUG-03 (2 Tests):**
+   - `verifies valid scrypt hashes and rejects malformed, non-power-of-two, negative, or excessive memory parameters` — **PASS**
+   - `supports legacy saltHex:keyHex format and automatically rehashes to approved scrypt policy on login` — **PASS**
+4. **BUG-04 (3 Tests):**
+   - `accepts valid 6 MiB binary evidence via Base64 JSON (which previously failed under 8mb Express limit)` — **PASS**
+   - `rejects oversized Base64 payloads (> 10 MiB binary) before allocation and rejects malformed Base64` — **PASS**
+   - `supports binary streaming upload (application/octet-stream) and rejects spoofed MIME magic bytes` — **PASS**
+5. **BUG-05 & BUG-10 (6 Tests):**
+   - `rejects malformed XML and XXE entity declarations` — **PASS**
+   - `flags missing trackpoint <time> tags instead of fabricating sequential timestamps` — **PASS**
+   - `does NOT mark barometricChannelDetected=true merely from Garmin/Suunto creator strings without pressure telemetry` — **PASS**
+   - `rejects excessive trackpoints (> maxTrackpoints) and processes 5,000 trackpoints in < 800ms (BUG-10)` — **PASS**
+   - `reports EXIF_TIMESTAMP_MISSING when JPEG lacks EXIF DateTimeOriginal instead of substituting current time` — **PASS**
+   - `computes decoded pixel luminance perceptual hashes (pHash) and detects near-duplicate images across re-encoding` — **PASS**
+6. **BUG-06 (2 Tests):**
+   - `fails closed when NODE_ENV is missing, production (even with flag=true), or development without explicit flag` — **PASS**
+   - `rejects demo seed operations and blocks demo accounts from logging in when NODE_ENV=production` — **PASS**
+7. **BUG-08 (2 Tests):**
+   - `initializes with empty loading state and never falls back to demo fixtures on failure in production` — **PASS**
+   - `clearly distinguishes empty lookup, verified match, and non-existent verification ID` — **PASS**
+8. **BUG-09 & Part 3 Health Gate (4 Tests):**
+   - `accurately reports LOCAL_SQLITE_TRIGGER_IMMUTABLE when no external WORM adapter is configured` — **PASS**
+   - `creates AES-256-GCM encrypted + HMAC-signed WORM archive bundles and detects any tampering on recovery` — **PASS**
+   - `alerts on external WORM replication adapter failures and succeeds when healthy adapter is registered` — **PASS**
+   - `exposes honest WORM status and dynamic health check via /api/v1/health and /api/v1/audit/worm-status` — **PASS**
+
+---
+
+## 3. Build, Typecheck & Linter Verification
+
+| Verification Step | Command | Result |
+| :--- | :--- | :--- |
+| TypeScript Typecheck | `npm run typecheck` (`tsc --noEmit`) | **PASS (0 errors)** |
+| Linter Check | `npm run lint` | **PASS (0 errors)** |
+| Production Bundle Build | `npm run build` (`vite build`) | **PASS (`dist/` built cleanly)** |

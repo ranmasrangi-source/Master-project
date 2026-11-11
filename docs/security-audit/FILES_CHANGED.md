@@ -1,43 +1,23 @@
-# 0 TO 8848 — FILES CHANGED MANIFEST
+# 0 TO 8848 — FILES CHANGED IN MASTER SECURITY REMEDIATION (`BUG-01` TO `BUG-10`)
 
-**Project:** 0 TO 8848 — Global Adventure Achievement Platform  
-**Repository:** `ranmasrangi-source/Master-project`  
-
----
-
-## 1. Modified Production Source Files
-
-| File Path | Summary of Security Remediations |
-| :--- | :--- |
-| `/src/types/platform.ts` | Added `gpsTimestampConsistent?: boolean`, `spoofingIndicators?: string[]`, and `exifTamperingIndicator?: boolean` to `EvidenceArtifact['extractedMetadata']`. |
-| `/src/server/auth.ts` | Removed optional caller-supplied fixed salt parameter from `hashPasswordScrypt(password: string)`; enforced unique 16-byte (128-bit) CSPRNG salts (`crypto.randomBytes(16)`) with explicit parameter encoding (`scrypt$16384$8$1$<saltHex>$<derivedHex>`); added `extractSaltHexFromStoredHash()` and `generateRandomMfaSecretHex()` (160-bit CSPRNG); added `'DESTINATION_RESEARCHER'` to `PRIVILEGED_MFA_ROLES`. |
-| `/src/server/cryptoEngine.ts` | Removed hardcoded `DEFAULT_DEV_HMAC_KEY_HEX`; exported `initializeProcessHmacKey()` enforcing `AUDIT_HMAC_SECRET_HEX` (>= 256 bits) in production (`CRYPTO_KEY_MISSING_IN_PRODUCTION`) and generating a 256-bit CSPRNG runtime key in `os.tmpdir()` (`0o600`) in non-production. |
-| `/src/server/privacyVault.ts` | Fixed `maskResidentialTrackpoints()` by removing `&& i === 0` and `&& i === points.length - 1` so all trackpoints before the apex within 2,000m of start and all trackpoints after the apex within 2,000m of end are masked. |
-| `/src/server/evidenceProcessor.ts` | Added WGS84 coordinate and elevation bounds checks (`GPX_OUT_OF_BOUNDS_COORDINATES`, `GPX_IMPOSSIBLE_ELEVATION`), monotonic timestamp validation, teleportation velocity and vertical jump anomaly flags, fake GPX creator tag detection, EXIF image editing software detection (`exifTamperingIndicator: true`), and filename `path.basename()` sanitization. |
-| `/src/server/db.ts` | Removed `TEST_ACCOUNTS_CREDENTIAL_INFO` and `getTotpCodeForUser()`; added `NON_SENSITIVE_ACCOUNT_PROFILES`, `isDemoProvisioningAllowed()`, `getTestOnlyAccountCredentials()`, `getDatabaseCredentialSecurityStats()`, migration `002_P0_P1_SECURITY_ROTATION`, `buildScopedBootstrapPayload()`, `sanitizeCertificateForViewer()`, `sanitizeSubmissionForViewer()`, applicant ownership check (`APPEAL_OWNERSHIP_FORBIDDEN`) in `fileAppealOnSubmissionServer()`, and holder/privacy-officer check (`PRIVACY_UPDATE_FORBIDDEN`) in `updateCertificatePrivacyConsentServer()`. |
-| `/src/server/apiRouter.ts` | Disabled `/api/v1/auth/accounts` across all HTTP methods (`HTTP 403 PUBLIC_ACCOUNT_DIRECTORY_DISABLED`); wired `GET /api/v1/bootstrap` to `buildScopedBootstrapPayload(sessionUser)`; enforced RBAC and ownership on `/destinations/:idOrCode/advance-stage`, `/submissions/:id/appeal`, `/certificates/:verificationId/privacy`, and `/ai/advisory-brief`; redacted `holderUserId` from `/leaderboards`. |
-| `/src/App.tsx` | Removed `/api/v1/auth/accounts` fetch, `TestAccountDirectoryEntry`, `accountsDirectory`, `handleSelectDirectoryAccount`, hardcoded initial password `'Verifier#8848!Dept219'`, and the TOTP-displaying `<select>` dropdown. |
+**Branch:** `security/remediate-bug01-bug10`  
+**Baseline Commit (`main`):** `4d5b28a`
 
 ---
 
-## 2. Modified & Added Automated Test Files
+## Modified & Created Files
 
-| File Path | Summary of Changes |
-| :--- | :--- |
-| `/src/tests/foundation.test.ts` | Updated test helpers to use `getTestOnlyAccountCredentials()`, `initializeProcessHmacKey()`, and verified `masked.removedCount === 3` on 2km residential trackpoint masking. |
-| `/src/tests/securityAuditP0P1.test.ts` | **NEW:** Dedicated 20-test P0/P1 security regression suite covering `BUG-P0-001` through `BUG-P1-006`. |
-
----
-
-## 3. Added Security Audit Documentation (`/docs/security-audit/`)
-
-1. `/docs/security-audit/BUG_REGISTER.md`
-2. `/docs/security-audit/P0_P1_REMEDIATION_REPORT.md`
-3. `/docs/security-audit/RBAC_TEST_REPORT.md`
-4. `/docs/security-audit/AUTHENTICATION_SECURITY_REPORT.md`
-5. `/docs/security-audit/BOOTSTRAP_PRIVACY_REPORT.md`
-6. `/docs/security-audit/CRYPTOGRAPHY_TEST_REPORT.md`
-7. `/docs/security-audit/EVIDENCE_SECURITY_REPORT.md`
-8. `/docs/security-audit/AUTOMATED_TEST_RESULTS.md`
-9. `/docs/security-audit/FILES_CHANGED.md`
-10. `/docs/security-audit/UNRESOLVED_RISKS.md`
+| File Path | Change Type | Associated Findings | Purpose of Changes |
+| :--- | :--- | :--- | :--- |
+| `src/server/auth.ts` | Modified | `BUG-01`, `BUG-02`, `BUG-03` | Added `BoundedInMemoryRateLimitStore`, 3-layer `(account+IP, IP, distributed account)` progressive rate limiting, `resolveTrustedClientIp`, `buildSessionCookieHeader`, `buildClearSessionCookieHeader`, `APPROVED_SCRYPT_POLICY`, `validateScryptHashParameters`, and `needsPasswordRehash`. |
+| `src/server/evidenceProcessor.ts` | Modified | `BUG-04`, `BUG-05`, `BUG-10` | Added `decodeAndValidateBase64Payload`, `readBoundedUploadStream`, strict vault path-traversal guard, `fast-xml-parser` GPX validation, `inspectTrackpointBarometricSensor`, `ExifReader` EXIF parsing without current-time substitution, `jpeg-js`/`pngjs` pixel decoding perceptual hash (`computeDecodedImagePerceptualHash`, `computePerceptualHashHammingDistance`), and linear $O(N)$ sliding-window ascent rate calculation (`MAX_GPX_TRACKPOINTS = 50000`). |
+| `src/server/wormArchiveService.ts` | Created | `BUG-09` | Implemented honest local vs. external WORM status reporting, `AES-256-GCM` + `HMAC-SHA256` encrypted audit archive bundle creation and recovery verification (`createEncryptedWormArchiveBundle`, `verifyAndRecoverWormArchiveBundle`), pluggable `WormProviderTransportAdapter`, and failure alerting. |
+| `src/server/db.ts` | Modified | `BUG-03`, `BUG-06` | Rewrote `isDemoProvisioningAllowed()` as fail-closed, added `validateStartupEnvironmentSecurity()` and `attemptDemoSeedOperationServer()`, blocked demo fixture logins in production (`DEMO_ACCOUNT_FORBIDDEN_IN_PRODUCTION`), and added automatic password rehash on login (`AUTH_PASSWORD_HASH_UPGRADED`). |
+| `src/server/apiRouter.ts` | Modified | `BUG-01`, `BUG-02`, `BUG-04`, `BUG-06`, `BUG-09`, `Part 3` | Wired 3-layer login rate limiting, `extractRawSessionToken` for cookie-based session validation and logout revocation, CSRF protection middleware, `15mb` Express JSON limit + `413` error handler, binary stream upload (`application/octet-stream`), `POST /api/v1/admin/demo-seed`, `GET /api/v1/audit/worm-status`, and dynamic runtime verification in `GET /api/v1/health`. |
+| `src/domain/bootstrapClientState.ts` | Created | `BUG-08` | Separated production server-synchronized bootstrap state from development-only demo fixtures; prevents failed or offline bootstrap requests from displaying fake demo submissions or certificates. |
+| `src/App.tsx` | Modified | `BUG-08` | Initialized `submissions`, `certificates`, and `auditEvents` to `[]` and `verifyLookupId` to `''`; added loading, offline, and server-error retry banners; added null-guards for empty verification queues. |
+| `package.json` | Modified | `BUG-07` | Declared `vitest`, `fast-xml-parser`, `exifreader`, `jpeg-js`, `pngjs`, `@types/pngjs` and added `"test"`, `"test:watch"`, `"test:coverage"`, and `"typecheck"` scripts. |
+| `package-lock.json` | Created / Updated | `BUG-07` | Locked deterministic dependency tree for reproducible `npm ci` execution in GitHub Actions. |
+| `.github/workflows/ci.yml` | Created | `BUG-07` | Added GitHub Actions CI pipeline executing `npm ci`, `npm run typecheck`, `npm run lint`, `npm test`, `npm run build`, and `npm audit --audit-level=high` on push and pull_request. |
+| `src/tests/bug01To10Remediation.test.ts` | Created | `BUG-01`..`BUG-10` | Added 27 comprehensive unit and HTTP integration tests verifying all 10 bug remediations and dynamic health checks. |
+| `docs/security-audit/*` | Updated | Documentation | Updated `BUG_REGISTER.md`, `P0_P1_REMEDIATION_REPORT.md`, `AUTOMATED_TEST_RESULTS.md`, `FILES_CHANGED.md`, and `UNRESOLVED_RISKS.md`. |

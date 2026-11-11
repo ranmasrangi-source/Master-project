@@ -17,12 +17,14 @@ import {
   ALL_RESOURCE_DOMAINS,
   ALL_USER_ROLES,
   evaluateRbacPermission,
-  INITIAL_AUDIT_EVENTS,
-  INITIAL_SUBMISSIONS_QUEUE,
-  INITIAL_VERIFIED_CERTIFICATES,
   MASTER_21_PHASES,
   ResourceDomain,
 } from './data/governanceAndPhases';
+import {
+  BootstrapLifecycleStatus,
+  resolveBootstrapFailureState,
+  resolveBootstrapSuccessState,
+} from './domain/bootstrapClientState';
 import {
   ActiveActorProfile,
   DEMO_ACTOR_PROFILES,
@@ -70,13 +72,14 @@ export default function App() {
   const [loginTotp, setLoginTotp] = useState<string>('');
   const [authLoading, setAuthLoading] = useState<boolean>(false);
 
-  // Server-Synchronized Catalog, Submissions, Certificates, Dual-Control & Audit Ledger
+  // Server-Synchronized Catalog, Submissions, Certificates, Dual-Control & Audit Ledger (BUG-08: Zero demo records in initial state)
+  const [bootstrapStatus, setBootstrapStatus] = useState<BootstrapLifecycleStatus>('LOADING');
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  const [devDemoBannerLabel, setDevDemoBannerLabel] = useState<string | null>(null);
   const [destinations, setDestinations] = useState<DestinationRecord[]>(DESTINATIONS_100_CATALOG);
-  const [submissions, setSubmissions] = useState<AchievementSubmission[]>(INITIAL_SUBMISSIONS_QUEUE);
-  const [certificates, setCertificates] = useState<PublicCertificateRecord[]>(
-    INITIAL_VERIFIED_CERTIFICATES
-  );
-  const [auditEvents, setAuditEvents] = useState<AppendOnlyAuditEvent[]>(INITIAL_AUDIT_EVENTS);
+  const [submissions, setSubmissions] = useState<AchievementSubmission[]>([]);
+  const [certificates, setCertificates] = useState<PublicCertificateRecord[]>([]);
+  const [auditEvents, setAuditEvents] = useState<AppendOnlyAuditEvent[]>([]);
   const [auditIntegrityValid, setAuditIntegrityValid] = useState<boolean>(true);
   const [dualControlApprovals, setDualControlApprovals] = useState<DualControlApprovalRecord[]>([]);
 
@@ -129,10 +132,8 @@ export default function App() {
   const [aiBriefLoading, setAiBriefLoading] = useState<boolean>(false);
   const [signedArtifactUrlInfo, setSignedArtifactUrlInfo] = useState<string | null>(null);
 
-  // Public Certificate Verifier & Leaderboard State
-  const [verifyLookupId, setVerifyLookupId] = useState<string>(
-    '8848-V1-9K4M-7P2X-Q8R5-3N6W-5T8B-2M'
-  );
+  // Public Certificate Verifier & Leaderboard State (BUG-08: Do not pre-fill sample verification ID before server bootstrap)
+  const [verifyLookupId, setVerifyLookupId] = useState<string>('');
   const [leaderboardMetric, setLeaderboardMetric] = useState<
     'ELEVATION_SUM' | 'VERIFIED_COUNT' | 'HIGHEST_APEX'
   >('ELEVATION_SUM');
@@ -151,33 +152,60 @@ export default function App() {
     return headers;
   }, [sessionToken]);
 
-  const fetchBootstrapData = useCallback(async (tokenOverride?: string) => {
-    try {
-      const headers: Record<string, string> = {};
-      const tok = tokenOverride !== undefined ? tokenOverride : sessionToken;
-      if (tok) headers.Authorization = `Bearer ${tok}`;
+  const fetchBootstrapData = useCallback(
+    async (tokenOverride?: string, explicitDevDemoMode: boolean = false) => {
+      setBootstrapStatus('LOADING');
+      setBootstrapError(null);
+      try {
+        const headers: Record<string, string> = {};
+        const tok = tokenOverride !== undefined ? tokenOverride : sessionToken;
+        if (tok) headers.Authorization = `Bearer ${tok}`;
 
-      const bootRes = await fetch('/api/v1/bootstrap', { headers });
-      if (bootRes.ok) {
+        const bootRes = await fetch('/api/v1/bootstrap', { headers });
+        if (!bootRes.ok) {
+          throw new Error(`Bootstrap request returned HTTP ${bootRes.status}.`);
+        }
+
         const data = await bootRes.json();
-        if (Array.isArray(data.destinations)) setDestinations(data.destinations);
-        if (Array.isArray(data.submissions)) {
-          setSubmissions(data.submissions);
+        const nextState = resolveBootstrapSuccessState(data);
+        setBootstrapStatus(nextState.status);
+        setBootstrapError(null);
+        setDevDemoBannerLabel(null);
+        setDestinations(nextState.destinations);
+        setSubmissions(nextState.submissions);
+        setCertificates(nextState.certificates);
+        setAuditEvents(nextState.auditEvents);
+        setAuditIntegrityValid(nextState.auditIntegrityValid);
+        setDualControlApprovals(nextState.dualControlApprovals);
+        setSessionUser(nextState.sessionUser);
+        if (nextState.certificates.length > 0) {
+          setVerifyLookupId((prev) => prev || nextState.certificates[0].verificationId);
         }
-        if (Array.isArray(data.certificates)) setCertificates(data.certificates);
-        if (Array.isArray(data.auditEvents)) setAuditEvents(data.auditEvents);
-        if (data.auditChainStatus) {
-          setAuditIntegrityValid(Boolean(data.auditChainStatus.valid));
-        }
-        if (Array.isArray(data.dualControlApprovals)) {
-          setDualControlApprovals(data.dualControlApprovals);
-        }
-        setSessionUser(data.sessionUser || null);
+      } catch (err) {
+        const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+        const failState = resolveBootstrapFailureState({
+          errorMessage:
+            err instanceof Error
+              ? err.message
+              : 'Failed to load server state from /api/v1/bootstrap.',
+          isOffline,
+          isProduction: !import.meta.env.DEV,
+          explicitDevDemoModeRequested: explicitDevDemoMode,
+        });
+        setBootstrapStatus(failState.status);
+        setBootstrapError(failState.errorMessage);
+        setDevDemoBannerLabel(failState.demoBannerLabel);
+        setDestinations(failState.destinations);
+        setSubmissions(failState.submissions);
+        setCertificates(failState.certificates);
+        setAuditEvents(failState.auditEvents);
+        setAuditIntegrityValid(failState.auditIntegrityValid);
+        setDualControlApprovals(failState.dualControlApprovals);
+        setSessionUser(failState.sessionUser);
       }
-    } catch {
-      // Fallback to initial state if offline
-    }
-  }, [sessionToken]);
+    },
+    [sessionToken]
+  );
 
   useEffect(() => {
     fetchBootstrapData();
@@ -327,31 +355,39 @@ export default function App() {
     [submissionTargetDestination, subMaxElevM, subApexDistM, subAscentRate, subHasBaro]
   );
 
-  const selectedSubmission = useMemo(
+  const selectedSubmission: AchievementSubmission | null = useMemo(
     () =>
       submissions.find((s) => s.id === selectedSubmissionId) ||
       submissions[0] ||
-      INITIAL_SUBMISSIONS_QUEUE[0],
+      null,
     [submissions, selectedSubmissionId]
   );
 
-  const activeCoiResult = useMemo(
-    () =>
-      runAutomatedFiveSignalCoiCheck(
-        activeActor,
-        selectedSubmission,
-        selectedSubmission.status === 'APPEALED'
-      ),
-    [activeActor, selectedSubmission]
-  );
+  const activeCoiResult = useMemo(() => {
+    if (!selectedSubmission) {
+      return {
+        overallPassed: true,
+        signals: [],
+        blockingReason: undefined,
+      };
+    }
+    return runAutomatedFiveSignalCoiCheck(
+      activeActor,
+      selectedSubmission,
+      selectedSubmission.status === 'APPEALED'
+    );
+  }, [activeActor, selectedSubmission]);
 
-  const lookedUpCertificate = useMemo(
-    () =>
-      certificates.find(
-        (c) => c.verificationId.toLowerCase() === verifyLookupId.trim().toLowerCase()
-      ),
-    [certificates, verifyLookupId]
-  );
+  const lookedUpCertificate = useMemo(() => {
+    if (bootstrapStatus !== 'READY' && bootstrapStatus !== 'DEV_DEMO_FIXTURE_MODE') {
+      return undefined;
+    }
+    const clean = verifyLookupId.trim().toLowerCase();
+    if (!clean) return undefined;
+    return certificates.find(
+      (c) => c.verificationId.toLowerCase() === clean
+    );
+  }, [certificates, verifyLookupId, bootstrapStatus]);
 
   // Server-Enforced Advance Destination Research Stage handler (SEC-GOV-001 & SEC-GOV-003 Dual-Control 2P)
   const handleAdvanceDestinationStage = async (dest: DestinationRecord) => {
@@ -490,6 +526,7 @@ export default function App() {
       | 'OVERTURN_AND_APPROVE'
       | 'UPHOLD_REJECTION'
   ) => {
+    if (!selectedSubmission) return;
     setWorkstationBanner(null);
     try {
       const res = await fetch(
@@ -532,6 +569,7 @@ export default function App() {
 
   // File Formal Appeal against a Rejected Submission
   const handleFileAppeal = async () => {
+    if (!selectedSubmission) return;
     setWorkstationBanner(null);
     try {
       const res = await fetch(
@@ -593,6 +631,7 @@ export default function App() {
 
   // Trigger Server-Side Advisory AI Brief (Non-Decisional)
   const handleRequestServerAiBrief = async () => {
+    if (!selectedSubmission) return;
     setAiBriefLoading(true);
     setAiBriefText(null);
     try {
@@ -885,6 +924,70 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      {/* BUG-08: Bootstrap Loading, Error/Retry, or Explicit Dev Demo Banner */}
+      {bootstrapStatus === 'LOADING' && (
+        <div
+          role="status"
+          className="bg-[#18181B] border-b border-[#C9A86A]/30 px-6 py-2 text-xs text-[#C9A86A] flex items-center justify-between"
+        >
+          <span>Synchronizing verified platform state with /api/v1/bootstrap...</span>
+          <span className="font-mono-tabular">LOADING</span>
+        </div>
+      )}
+
+      {(bootstrapStatus === 'ERROR' || bootstrapStatus === 'OFFLINE_ERROR') && (
+        <div
+          role="alert"
+          className="bg-red-950/80 border-b border-red-500/40 px-6 py-3 text-xs text-red-200 flex flex-wrap items-center justify-between gap-4"
+        >
+          <div>
+            <strong className="text-red-300 font-semibold">
+              {bootstrapStatus === 'OFFLINE_ERROR'
+                ? 'Offline — Server Synchronization Unavailable: '
+                : 'Bootstrap Synchronization Failed: '}
+            </strong>
+            <span>{bootstrapError}</span>
+            <span className="ml-2 text-red-300/80">
+              (Demo fallback is disabled to protect verification integrity.)
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => fetchBootstrapData()}
+              className="px-3 py-1 rounded bg-red-500 text-black font-semibold hover:bg-red-400 transition-colors"
+            >
+              Retry Synchronization
+            </button>
+            {import.meta.env.DEV && (
+              <button
+                type="button"
+                onClick={() => fetchBootstrapData(undefined, true)}
+                className="px-3 py-1 rounded border border-amber-400/50 text-amber-300 hover:bg-amber-950/50 transition-colors"
+              >
+                Load Labeled Dev Demo Fixtures
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {devDemoBannerLabel && (
+        <div
+          role="status"
+          className="bg-amber-950/80 border-b border-amber-500/40 px-6 py-2 text-xs text-amber-200 flex items-center justify-between"
+        >
+          <span className="font-mono-tabular font-semibold">{devDemoBannerLabel}</span>
+          <button
+            type="button"
+            onClick={() => fetchBootstrapData()}
+            className="underline hover:text-white"
+          >
+            Reconnect to Live Server
+          </button>
+        </div>
+      )}
 
       {/* =====================================================================
           SERVER-SIDE AUTHENTICATION & MFA SESSION BAR (SEC-AUTH-001)
@@ -1866,8 +1969,15 @@ export default function App() {
               </div>
 
               <div className="space-y-3">
+                {submissions.length === 0 && (
+                  <div className="p-4 rounded-xl bg-[#18181B]/60 border border-white/10 text-xs text-[#A1A1AA]">
+                    {bootstrapStatus === 'LOADING'
+                      ? 'Loading verified submission queue from server...'
+                      : 'No achievement dossiers currently in queue.'}
+                  </div>
+                )}
                 {submissions.map((sub) => {
-                  const isSelected = sub.id === selectedSubmission.id;
+                  const isSelected = selectedSubmission?.id === sub.id;
                   return (
                     <div
                       key={sub.id}
@@ -1914,6 +2024,21 @@ export default function App() {
             </div>
 
             <div className="lg:col-span-8 bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-6">
+              {!selectedSubmission ? (
+                <div className="p-8 rounded-xl bg-[#18181B] border border-white/10 text-center space-y-2">
+                  <p className="font-semibold text-sm text-white">
+                    {bootstrapStatus === 'LOADING'
+                      ? 'Synchronizing Verification Workstation...'
+                      : 'No Active Dossier Selected'}
+                  </p>
+                  <p className="text-xs text-[#A1A1AA]">
+                    {bootstrapError
+                      ? 'Unable to load server verification queue. Retry connection above.'
+                      : 'Select a dossier from the queue or submit a new achievement record.'}
+                  </p>
+                </div>
+              ) : (
+                <>
               <div className="flex flex-wrap items-start justify-between gap-4 border-b border-white/10 pb-4">
                 <div>
                   <div className="flex items-center gap-2 text-xs font-mono-tabular text-[#C9A86A]">
@@ -2221,6 +2346,8 @@ export default function App() {
                   </div>
                 )}
               </div>
+                </>
+              )}
             </div>
           </section>
         )}

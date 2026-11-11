@@ -1,0 +1,52 @@
+name: 0 TO 8848 Security & Quality Gate CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'security/**'
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  security-and-verification-gate:
+    name: Typecheck, Lint, Automated Security Suite & Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run TypeScript typecheck
+        run: npm run typecheck
+
+      - name: Run linter
+        run: npm run lint
+
+      - name: Run automated security and regression test suite
+        run: npm test
+        env:
+          NODE_ENV: test
+          ENABLE_DEV_DEMO_PROVISIONING: 'true'
+
+      - name: Build production bundle
+        run: npm run build
+        env:
+          NODE_ENV: production
+
+      - name: Security dependency audit (high/critical)
+        run: npm audit --audit-level=high

@@ -31,6 +31,7 @@ import {
   generateSessionTokenPair,
   hashPasswordScrypt,
   hashSessionToken,
+  needsPasswordRehash,
   roleRequiresMfa,
   verifyPasswordScrypt,
   verifyTotpCode,
@@ -54,19 +55,72 @@ let dbInstance: DatabaseSync | null = null;
 let currentDbPath: string = '';
 
 /**
- * BUG-P0-001 Remediation:
- * Demo/test account provisioning is strictly prohibited in production (NODE_ENV === 'production').
- * Even if an environment flag is set accidentally, production unconditionally disables demo provisioning.
+ * BUG-P0-001 & BUG-06 Remediation:
+ * Fail-Closed Demo/Test Account Provisioning Guard.
+ * - Returns FALSE if NODE_ENV is missing/undefined.
+ * - Returns FALSE if NODE_ENV === 'production', even if ENABLE_DEV_DEMO_PROVISIONING === 'true'.
+ * - Returns TRUE in 'test' environment (or VITEST === 'true' when NODE_ENV !== 'production').
+ * - Returns TRUE in 'development' ONLY when ENABLE_DEV_DEMO_PROVISIONING === 'true' is explicitly set.
  */
-export function isDemoProvisioningAllowed(): boolean {
-  if (process.env.NODE_ENV === 'production') {
+export function isDemoProvisioningAllowed(
+  envOverride?: Record<string, string | undefined>
+): boolean {
+  const env = envOverride ?? process.env;
+  const nodeEnv = (env.NODE_ENV || '').trim().toLowerCase();
+
+  if (!nodeEnv || nodeEnv === 'production') {
     return false;
   }
-  return (
-    process.env.NODE_ENV === 'test' ||
-    Boolean(process.env.VITEST) ||
-    process.env.ENABLE_DEV_DEMO_PROVISIONING !== 'false'
-  );
+  if (nodeEnv === 'test') {
+    return env.ENABLE_DEV_DEMO_PROVISIONING !== 'false';
+  }
+  if (nodeEnv === 'development') {
+    return env.ENABLE_DEV_DEMO_PROVISIONING === 'true';
+  }
+  return false;
+}
+
+export interface StartupSecurityValidationResult {
+  safe: boolean;
+  demoProvisioningAllowed: boolean;
+  warnings: string[];
+  criticalViolations: string[];
+}
+
+/**
+ * BUG-06 Remediation:
+ * Validates startup environment configuration and detects dangerous flags.
+ */
+export function validateStartupEnvironmentSecurity(
+  envOverride?: Record<string, string | undefined>
+): StartupSecurityValidationResult {
+  const env = envOverride ?? process.env;
+  const nodeEnv = (env.NODE_ENV || '').trim().toLowerCase();
+  const warnings: string[] = [];
+  const criticalViolations: string[] = [];
+
+  if (!nodeEnv) {
+    warnings.push(
+      'MISSING_NODE_ENV: NODE_ENV is not set. Platform defaults to fail-closed production security posture (demo provisioning disabled).'
+    );
+  }
+  if (nodeEnv === 'production' && env.ENABLE_DEV_DEMO_PROVISIONING === 'true') {
+    criticalViolations.push(
+      'DANGEROUS_CONFIG_BLOCKED: ENABLE_DEV_DEMO_PROVISIONING=true was detected while NODE_ENV=production. Demo provisioning remains hard-blocked.'
+    );
+  }
+  if (nodeEnv === 'production' && !env.AUDIT_HMAC_SECRET_HEX?.trim()) {
+    criticalViolations.push(
+      'MISSING_PRODUCTION_HMAC_KEY: AUDIT_HMAC_SECRET_HEX is mandatory when NODE_ENV=production.'
+    );
+  }
+
+  return {
+    safe: criticalViolations.length === 0,
+    demoProvisioningAllowed: isDemoProvisioningAllowed(env),
+    warnings,
+    criticalViolations,
+  };
 }
 
 export interface NonSensitiveAccountDirectoryProfile {
@@ -1174,6 +1228,37 @@ export function listDualControlApprovals(): DualControlApprovalRecord[] {
   }));
 }
 
+export function attemptDemoSeedOperationServer(
+  actorInternalUuid: string = 'system-startup-guard',
+  actorRole: UserRole = 'PLATFORM_SYSADMIN',
+  envOverride?: Record<string, string | undefined>
+): { allowed: boolean; status: string } {
+  const db = getDb();
+  if (!isDemoProvisioningAllowed(envOverride)) {
+    appendAuditEventInternal(db, {
+      actorInternalUuid,
+      actorRole,
+      actionType: 'SECURITY_DEMO_SEED_REJECTED',
+      targetEntityType: 'SYSTEM_CONFIG',
+      targetEntityId: 'DEMO_PROVISIONING_GUARD',
+      summary:
+        'Rejected demo/test account seed operation because fail-closed production/environment guard is active.',
+    });
+    throw new Error(
+      'DEMO_SEED_FORBIDDEN_IN_PRODUCTION: Demo seed operations are strictly prohibited when fail-closed production guard is active.'
+    );
+  }
+  appendAuditEventInternal(db, {
+    actorInternalUuid,
+    actorRole,
+    actionType: 'DEMO_SEED_AUTHORIZED_DEV_TEST',
+    targetEntityType: 'SYSTEM_CONFIG',
+    targetEntityId: 'DEMO_PROVISIONING_GUARD',
+    summary: 'Authorized non-production demo/test fixture verification.',
+  });
+  return { allowed: true, status: 'DEMO_FIXTURES_ACTIVE' };
+}
+
 /**
  * SEC-AUTH-001:
  * Authenticates a user with password + MFA verification (mandatory for privileged roles)
@@ -1185,6 +1270,7 @@ export function authenticateUserSession(params: {
   totpCode?: string;
 }): {
   sessionToken: string;
+  passwordRehashed?: boolean;
   user: AuthenticatedSessionUser;
 } {
   const db = getDb();
@@ -1198,6 +1284,22 @@ export function authenticateUserSession(params: {
 
   if (!row || Boolean(row.is_erased)) {
     throw new Error('AUTH_INVALID_CREDENTIALS: Invalid username or password.');
+  }
+
+  const userIdStr = String(row.user_id);
+  const isDemoFixtureAccount = Boolean(NON_SENSITIVE_ACCOUNT_PROFILES[userIdStr]);
+  if (isDemoFixtureAccount && !isDemoProvisioningAllowed()) {
+    appendAuditEventInternal(db, {
+      actorInternalUuid: String(row.internal_actor_uuid),
+      actorRole: String(row.role) as UserRole,
+      actionType: 'SECURITY_DEMO_AUTH_BLOCKED_IN_PRODUCTION',
+      targetEntityType: 'USER_ACCOUNT',
+      targetEntityId: userIdStr,
+      summary: `Blocked authentication attempt for demo/test fixture account (${userIdStr}) because demo provisioning is disabled in current environment.`,
+    });
+    throw new Error(
+      'DEMO_ACCOUNT_FORBIDDEN_IN_PRODUCTION: Demo and test fixture credentials cannot authenticate in production.'
+    );
   }
 
   const storedHash = String(row.password_hash);
@@ -1220,12 +1322,32 @@ export function authenticateUserSession(params: {
     }
   }
 
+  const shouldUpgradeHash = needsPasswordRehash(storedHash);
+  const upgradedPasswordHash = shouldUpgradeHash
+    ? hashPasswordScrypt(params.password)
+    : null;
+
   const { rawSessionToken, tokenSha256Hash, expiresAtUtc } =
     generateSessionTokenPair(8);
   const sessionId = `sess-${Date.now()}-${tokenSha256Hash.slice(0, 8)}`;
   const nowUtc = new Date().toISOString();
 
   runInTransaction(db, () => {
+    if (upgradedPasswordHash) {
+      db.prepare('UPDATE users SET password_hash = ? WHERE user_id = ?').run(
+        upgradedPasswordHash,
+        userIdStr
+      );
+      appendAuditEventInternal(db, {
+        actorInternalUuid: String(row.internal_actor_uuid),
+        actorRole: role,
+        actionType: 'AUTH_PASSWORD_HASH_UPGRADED',
+        targetEntityType: 'USER_ACCOUNT',
+        targetEntityId: userIdStr,
+        summary: `Automatically upgraded password hash parameters to approved scrypt policy for ${String(row.officer_code)}.`,
+      });
+    }
+
     db.prepare(`
       INSERT INTO user_sessions (
         session_id, token_sha256_hash, user_id, mfa_verified, created_at_utc, expires_at_utc, revoked_at_utc
@@ -1233,7 +1355,7 @@ export function authenticateUserSession(params: {
     `).run(
       sessionId,
       tokenSha256Hash,
-      String(row.user_id),
+      userIdStr,
       mfaRequired ? 1 : 0,
       nowUtc,
       expiresAtUtc
@@ -1251,6 +1373,7 @@ export function authenticateUserSession(params: {
 
   return {
     sessionToken: rawSessionToken,
+    passwordRehashed: shouldUpgradeHash,
     user: {
       userId: String(row.user_id),
       internalActorUuid: String(row.internal_actor_uuid),
