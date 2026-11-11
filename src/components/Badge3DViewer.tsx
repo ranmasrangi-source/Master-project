@@ -21,7 +21,7 @@ export const Badge3DViewer: React.FC<Badge3DViewerProps> = ({
   const [rotY, setRotY] = useState<number>(-16);
   const [renderMode, setRenderMode] = useState<'3D_INTERACTIVE' | '2D_VECTOR'>('3D_INTERACTIVE');
 
-  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (renderMode === '2D_VECTOR') return;
     const rect = e.currentTarget.getBoundingClientRect();
     const x = (e.clientX - rect.left) / rect.width - 0.5;
@@ -78,11 +78,11 @@ export const Badge3DViewer: React.FC<Badge3DViewerProps> = ({
 
       {/* Interactive 3D / 2D Emblem Stage */}
       <div
-        onMouseMove={handleMouseMove}
-        onMouseLeave={handleReset}
+        onPointerMove={handlePointerMove}
+        onPointerLeave={handleReset}
         className={`relative flex items-center justify-center ${
           compact ? 'h-52' : 'h-64'
-        } select-none cursor-grab active:cursor-grabbing rounded-lg bg-gradient-to-b from-[#0A0A0A] via-[#141417] to-[#0A0A0A] border border-white/5 overflow-hidden`}
+        } select-none touch-none cursor-grab active:cursor-grabbing rounded-lg bg-gradient-to-b from-[#0A0A0A] via-[#141417] to-[#0A0A0A] border border-white/5 overflow-hidden`}
         style={{ perspective: '900px' }}
       >
         {/* Subtle topographic contour rings background */}

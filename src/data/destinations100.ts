@@ -2267,8 +2267,11 @@ const RAW_100_SEEDS: RawDestinationSeed[] = [
 export const DESTINATIONS_100_CATALOG: DestinationRecord[] = RAW_100_SEEDS.map((seed) => {
   const code = `DEST-${String(seed.num).padStart(3, '0')}`;
   const elevationFt = Math.round(seed.elevM * 3.28084);
-  const isPublished = seed.stage === '5_PUBLISHED';
-  const citationVerified = seed.stage === '4_REVIEWED_AND_APPROVED' || seed.stage === '5_PUBLISHED';
+  // Stage A Section 6 Baseline Reset: All 100 destinations initialize at '1_PROPOSED'
+  // and only advance through persisted researcher dossiers and Dual-Control (2P) approvals.
+  const baselineStage: ResearchStage = '1_PROPOSED';
+  const isPublished = false;
+  const citationVerified = false;
 
   const maxAscentRate =
     seed.tier === 'TIER_A_EXPEDITION'
@@ -2344,7 +2347,7 @@ export const DESTINATIONS_100_CATALOG: DestinationRecord[] = RAW_100_SEEDS.map((
       knownMultipathZones: 'Steep headwalls, glacial cirques, and narrow rock couloirs evaluated via 15-minute rolling kinematic window.',
       requiresBarometricChannel: seed.tier === 'TIER_A_EXPEDITION',
     },
-    researchStage: seed.stage,
+    researchStage: baselineStage,
     publicationStatus: isPublished ? 'PUBLISHED' : 'UNPUBLISHED_DRAFT',
     badgeIdentity: {
       badgeCode: `BDG-8848-${String(seed.num).padStart(3, '0')}`,

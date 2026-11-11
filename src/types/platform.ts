@@ -44,6 +44,16 @@ export type ActionVerb =
   | 'PUBLISH'
   | 'REVOKE';
 
+export type EvidenceBasedPhaseStatus =
+  | 'NOT_STARTED'
+  | 'DOCUMENTED'
+  | 'DESIGNED'
+  | 'PARTIALLY_IMPLEMENTED'
+  | 'IMPLEMENTED'
+  | 'TESTED'
+  | 'ACCEPTED'
+  | 'HARD_LOCKED_GATE';
+
 export interface TelemetryEnvelope {
   summitGeofenceRadiusM: number;
   elevationBandToleranceM: number;
@@ -101,6 +111,7 @@ export type SubmissionStatus =
   | 'SUBMITTED'
   | 'UNDER_REVIEW'
   | 'AWAITING_SECOND_REVIEW'
+  | 'ESCALATED_SPLIT_DECISION'
   | 'ADDITIONAL_EVIDENCE_REQUESTED'
   | 'APPROVED'
   | 'REJECTED'
@@ -111,18 +122,24 @@ export interface EvidenceArtifact {
   id: string;
   type: 'GPX_TELEMETRY' | 'RAW_EXIF_PHOTO' | 'OFFICIAL_PERMIT_DOC' | 'SUMMIT_REGISTER_LOG' | 'MINISTRY_LEGACY_CERTIFICATE';
   fileName: string;
+  fileSizeBytes?: number;
+  mimeType?: string;
   sha256PostUploadDigest: string;
   perceptualHash?: string;
   uploadedAtUtc: string;
+  vaultStorageKey?: string;
   extractedMetadata: {
     deviceModel?: string;
     captureTimestampUtc?: string;
     recordedMaxElevationM?: number;
     distanceSummitedFromApexM?: number;
     rolling15mMaxAscentMPerHr?: number;
+    trackpointCount?: number;
+    maskedResidentialTrackpointsCount?: number;
     exifSoftwareTag?: string;
     residentialStartEndMasked: boolean;
     permitReferenceCode?: string;
+    barometricChannelDetected?: boolean;
   };
 }
 
@@ -155,6 +172,7 @@ export interface AchievementSubmission {
   id: string;
   submissionCode: string;
   applicantUserId: string;
+  applicantInternalActorUuid?: string;
   applicantDisplayName: string;
   applicantInitials: string;
   applicantNationality: string;
@@ -193,11 +211,13 @@ export interface AchievementSubmission {
 }
 
 export interface PublicCertificateRecord {
-  verificationId: string; // Non-enumerable 128-bit Base32 token e.g. 8848-V1-9K4M-7P2X-Q8R5-3N6W
+  verificationId: string; // Non-enumerable 128-bit Base32 token e.g. 8848-V1-XXXX-XXXX-XXXX-XXXX-XXXX-XXXXXX
   submissionId: string;
   holderUserId: string;
+  holderInternalActorUuid?: string;
   holderPublicDisplay: string;
   holderPrivacyMode: 'FULL_VERIFIED_NAME' | 'DISPLAY_HANDLE_OR_INITIALS' | 'PRIVATE_CREDENTIAL_HOLDER';
+  holderDatePrecision?: 'EXACT_DATE' | 'MONTH_AND_YEAR_ONLY' | 'YEAR_ONLY';
   holderNationality: string;
   destinationId: string;
   destinationCode: string;
@@ -230,5 +250,43 @@ export interface AppendOnlyAuditEvent {
   summary: string;
   previousEventHmac: string;
   currentEventHmac: string;
+  keyVersion?: string;
   wormReplicated: boolean;
+  storageMode?: 'LOCAL_SQLITE_TRIGGER_IMMUTABLE' | 'CLOUD_WORM_OBJECT_LOCK';
+}
+
+export interface DualControlApprovalRecord {
+  approvalId: string;
+  operationType:
+    | 'DESTINATION_STAGE_4_APPROVE'
+    | 'DESTINATION_STAGE_5_PUBLISH'
+    | 'CERTIFICATE_REVOKE'
+    | 'ROLE_ASSIGNMENT';
+  targetEntityId: string;
+  initiatorUserId: string;
+  initiatorOfficerCode: string;
+  initiatorRole: UserRole;
+  reason: string;
+  status: 'PENDING_SECOND_APPROVAL' | 'EXECUTED' | 'CANCELLED' | 'EXPIRED';
+  cosignerUserId?: string;
+  cosignerOfficerCode?: string;
+  cosignerRole?: UserRole;
+  createdAtUtc: string;
+  expiresAtUtc: string;
+  resolvedAtUtc?: string;
+}
+
+export interface AuthenticatedSessionUser {
+  userId: string;
+  internalActorUuid: string;
+  username: string;
+  officerCode: string;
+  displayName: string;
+  role: UserRole;
+  organizationId?: string;
+  expeditionRosterGroupCode?: string;
+  isGuideForUserIds?: string[];
+  mfaRequired: boolean;
+  mfaVerified: boolean;
+  sessionExpiresAtUtc: string;
 }

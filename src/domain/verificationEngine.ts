@@ -6,6 +6,7 @@ import {
 
 export interface ReviewerProfileContext {
   userId: string;
+  internalActorUuid?: string;
   officerCode: string;
   displayName: string;
   role: UserRole;
@@ -14,9 +15,12 @@ export interface ReviewerProfileContext {
   isGuideForUserIds?: string[];
 }
 
+export type ActiveActorProfile = ReviewerProfileContext;
+
 export const DEMO_ACTOR_PROFILES: Record<string, ReviewerProfileContext> = {
   'actor-adventurer-tenzing': {
     userId: 'usr-tenzing-nepal',
+    internalActorUuid: 'act-uuid-tenzing-001',
     officerCode: 'ADV-NP-001',
     displayName: 'Mingma Dorjee Sherpa (Adventurer)',
     role: 'REGISTERED_ADVENTURER',
@@ -25,6 +29,7 @@ export const DEMO_ACTOR_PROFILES: Record<string, ReviewerProfileContext> = {
   },
   'actor-reviewer-independent-219': {
     userId: 'usr-reviewer-219',
+    internalActorUuid: 'act-uuid-rev-219',
     officerCode: 'REV-OFFICER-219',
     displayName: 'Dr. Pemba Sherpa (Independent Verification Officer)',
     role: 'VERIFICATION_OFFICER',
@@ -32,13 +37,23 @@ export const DEMO_ACTOR_PROFILES: Record<string, ReviewerProfileContext> = {
   },
   'actor-reviewer-104': {
     userId: 'usr-reviewer-104',
+    internalActorUuid: 'act-uuid-rev-104',
     officerCode: 'REV-OFFICER-104',
     displayName: 'Kilian Vance (Verification Officer — Reviewed Sub 101 & 103)',
     role: 'VERIFICATION_OFFICER',
     organizationId: 'org-independent-verif-dept',
   },
+  'actor-senior-lead-301': {
+    userId: 'usr-senior-lead-301',
+    internalActorUuid: 'act-uuid-lead-301',
+    officerCode: 'REV-LEAD-301',
+    displayName: 'Ang Phurba Sherpa (Senior Verification Lead)',
+    role: 'SENIOR_VERIFICATION_LEAD',
+    organizationId: 'org-independent-verif-dept',
+  },
   'actor-reviewer-conflicted-guide': {
     userId: 'usr-guide-conflict-demo',
+    internalActorUuid: 'act-uuid-guide-399',
     officerCode: 'REV-OFFICER-399',
     displayName: 'Dawa Geljen (Reviewer with Guide/Roster COI on Sub 101)',
     role: 'VERIFICATION_OFFICER',
@@ -48,6 +63,7 @@ export const DEMO_ACTOR_PROFILES: Record<string, ReviewerProfileContext> = {
   },
   'actor-appeal-officer-401': {
     userId: 'usr-appeal-401',
+    internalActorUuid: 'act-uuid-appeal-401',
     officerCode: 'APL-TRIBUNAL-401',
     displayName: 'Justice Ananya Adhikari (Independent Appeal Officer)',
     role: 'APPEAL_OFFICER',
@@ -55,12 +71,21 @@ export const DEMO_ACTOR_PROFILES: Record<string, ReviewerProfileContext> = {
   },
   'actor-governance-founder': {
     userId: 'usr-gov-founder-001',
+    internalActorUuid: 'act-uuid-founder-001',
     officerCode: 'GOV-FOUNDER-001',
-    displayName: 'Founder & Governance Committee (Dual-Control 2P)',
+    displayName: 'Platform Founder (Dual-Control Principal 1)',
     role: 'FOUNDER',
+  },
+  'actor-governance-committee-002': {
+    userId: 'usr-gov-committee-002',
+    internalActorUuid: 'act-uuid-gov-002',
+    officerCode: 'GOV-COMMITTEE-002',
+    displayName: 'Governance Committee Chair (Dual-Control Principal 2)',
+    role: 'GOVERNANCE_COMMITTEE',
   },
   'actor-researcher-501': {
     userId: 'usr-researcher-501',
+    internalActorUuid: 'act-uuid-res-501',
     officerCode: 'RES-CARTO-501',
     displayName: 'Suman Thapa (Destination Geodetic Researcher)',
     role: 'DESTINATION_RESEARCHER',
@@ -144,7 +169,7 @@ export function runAutomatedFiveSignalCoiCheck(
           ? 'Appeal Officer had zero involvement in the disputed initial decision.'
           : 'Officer has not yet cast a review vote on this dossier.'
         : isAppealAdjudication
-        ? 'BLOCKED: Original decision-maker (REV-OFFICER-104) is strictly prohibited from reviewing their own disputed rejection.'
+        ? 'BLOCKED: Original decision-maker is strictly prohibited from reviewing their own disputed rejection.'
         : 'BLOCKED: Officer already submitted the first review on this Tier-A dossier; second review requires a distinct human officer.',
     },
   ];
@@ -156,39 +181,6 @@ export function runAutomatedFiveSignalCoiCheck(
     signals,
     blockingReason: failedSignal ? failedSignal.detail : undefined,
   };
-}
-
-export function generateNonEnumerableVerificationId(seedNum: number): string {
-  const alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
-  let token = '';
-  let x = (seedNum * 2654435761 + Date.now()) >>> 0;
-  for (let i = 0; i < 16; i++) {
-    x = (x ^ (x << 13)) >>> 0;
-    x = (x ^ (x >>> 17)) >>> 0;
-    x = (x ^ (x << 5)) >>> 0;
-    token += alphabet[x % alphabet.length];
-    if (i === 3 || i === 7 || i === 11) {
-      token += '-';
-    }
-  }
-  return `8848-V1-${token}`;
-}
-
-export function computeDeterministicHmacDigest(payload: string, prevHmac: string): string {
-  const combined = `${prevHmac}|${payload}`;
-  let h1 = 0xdeadbeef ^ combined.length;
-  let h2 = 0x41c6ce57 ^ combined.length;
-  for (let i = 0, ch; i < combined.length; i++) {
-    ch = combined.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  const hex1 = (h1 >>> 0).toString(16).padStart(8, '0');
-  const hex2 = (h2 >>> 0).toString(16).padStart(8, '0');
-  const hex3 = ((h1 ^ h2) >>> 0).toString(16).padStart(8, '0');
-  return `hmac256:${hex1}${hex2}${hex3}${hex1}${hex2}${hex3}`;
 }
 
 export interface TelemetryForensicEvaluation {
@@ -211,7 +203,8 @@ export function evaluateContextualTelemetry(
   const withinElevationBand = elevDelta <= env.elevationBandToleranceM;
   const withinGeofence = distanceFromApexM <= env.summitGeofenceRadiusM;
   const withinKinematicAscentEnvelope =
-    rolling15mAscentRateMPerHr <= env.maxPlausibleAscentRateMPerHr;
+    rolling15mAscentRateMPerHr <= env.maxPlausibleAscentRateMPerHr &&
+    rolling15mAscentRateMPerHr > 0;
   const barometricCorroborated = env.requiresBarometricChannel ? hasBarometricChannel : true;
 
   const summaryNotes: string[] = [

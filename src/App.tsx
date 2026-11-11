@@ -1,26 +1,21 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  AlertTriangle,
-  Award,
   CheckCircle2,
-  Compass,
-  FileCheck2,
-  Globe,
-  Lock,
-  Mountain,
-  Scale,
+  KeyRound,
+  LogOut,
   Search,
-  Shield,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
   Upload,
-  UserCheck,
   XCircle,
 } from 'lucide-react';
 import { Badge3DViewer } from './components/Badge3DViewer';
 import { DESTINATIONS_100_CATALOG } from './data/destinations100';
 import {
+  ALL_ACTION_VERBS,
+  ALL_RESOURCE_DOMAINS,
+  ALL_USER_ROLES,
   evaluateRbacPermission,
   INITIAL_AUDIT_EVENTS,
   INITIAL_SUBMISSIONS_QUEUE,
@@ -29,17 +24,19 @@ import {
   ResourceDomain,
 } from './data/governanceAndPhases';
 import {
-  computeDeterministicHmacDigest,
+  ActiveActorProfile,
   DEMO_ACTOR_PROFILES,
   evaluateContextualTelemetry,
-  generateNonEnumerableVerificationId,
   runAutomatedFiveSignalCoiCheck,
 } from './domain/verificationEngine';
 import {
   AchievementSubmission,
   ActionVerb,
   AppendOnlyAuditEvent,
+  AuthenticatedSessionUser,
   DestinationRecord,
+  DualControlApprovalRecord,
+  EvidenceArtifact,
   PublicCertificateRecord,
   ResearchStage,
   UserRole,
@@ -59,20 +56,40 @@ type ActiveSection =
   | 'CERTIFICATES_STANDINGS'
   | 'GOVERNANCE_PHASES';
 
+interface TestAccountDirectoryEntry {
+  userId: string;
+  username: string;
+  role: UserRole;
+  displayName: string;
+  officerCode: string;
+  defaultPasswordHint: string;
+  currentTotpCode: string | null;
+}
+
 export default function App() {
   // Navigation & Global Workspace Preferences
   const [activeSection, setActiveSection] = useState<ActiveSection>('DESTINATIONS');
   const [lang, setLang] = useState<'EN' | 'NE'>('EN');
   const [unitSystem, setUnitSystem] = useState<'METRIC' | 'IMPERIAL'>('METRIC');
-  const [activeActorKey, setActiveActorKey] = useState<string>('actor-reviewer-independent-219');
 
-  // Stateful Catalog, Submissions, Certificates & Append-Only Audit Ledger
+  // Authenticated Server Session State (SEC-AUTH-001: Zero client-side role switching)
+  const [sessionToken, setSessionToken] = useState<string>('');
+  const [sessionUser, setSessionUser] = useState<AuthenticatedSessionUser | null>(null);
+  const [accountsDirectory, setAccountsDirectory] = useState<TestAccountDirectoryEntry[]>([]);
+  const [loginUsername, setLoginUsername] = useState<string>('pemba.verifier');
+  const [loginPassword, setLoginPassword] = useState<string>('Verifier#8848!Dept219');
+  const [loginTotp, setLoginTotp] = useState<string>('');
+  const [authLoading, setAuthLoading] = useState<boolean>(false);
+
+  // Server-Synchronized Catalog, Submissions, Certificates, Dual-Control & Audit Ledger
   const [destinations, setDestinations] = useState<DestinationRecord[]>(DESTINATIONS_100_CATALOG);
   const [submissions, setSubmissions] = useState<AchievementSubmission[]>(INITIAL_SUBMISSIONS_QUEUE);
   const [certificates, setCertificates] = useState<PublicCertificateRecord[]>(
     INITIAL_VERIFIED_CERTIFICATES
   );
   const [auditEvents, setAuditEvents] = useState<AppendOnlyAuditEvent[]>(INITIAL_AUDIT_EVENTS);
+  const [auditIntegrityValid, setAuditIntegrityValid] = useState<boolean>(true);
+  const [dualControlApprovals, setDualControlApprovals] = useState<DualControlApprovalRecord[]>([]);
 
   // Destination Explorer Filters
   const [selectedRegion, setSelectedRegion] = useState<WorldRegion | 'ALL' | 'NEPAL_ANCHOR'>('ALL');
@@ -102,6 +119,8 @@ export default function App() {
   const [subNarrative, setSubNarrative] = useState<string>(
     'Completed Southwest Ridge ascent from Camp II across Mushroom Ridge to main summit snow dome. Continuous multi-band GNSS + barometric altimeter telemetry and original EXIF summit photographs attached.'
   );
+  const [uploadedArtifacts, setUploadedArtifacts] = useState<EvidenceArtifact[]>([]);
+  const [uploadStatusMsg, setUploadStatusMsg] = useState<string | null>(null);
   const [submissionFeedback, setSubmissionFeedback] = useState<string | null>(null);
 
   // Verification Workstation & Appeal Tribunal State
@@ -110,15 +129,21 @@ export default function App() {
   const [reviewRationaleInput, setReviewRationaleInput] = useState<string>(
     'Corroborated multi-band GNSS + barometric altitude profile against official route geofence, verified raw EXIF solar geometry, and confirmed official climbing permit.'
   );
+  const [appealGroundsInput, setAppealGroundsInput] = useState<string>(
+    'Submitting secondary dual-frequency GNSS logger and high-camp barometric log demonstrating continuous summit ridge progression.'
+  );
   const [workstationBanner, setWorkstationBanner] = useState<{
     type: 'SUCCESS' | 'ERROR' | 'INFO';
     text: string;
   } | null>(null);
   const [aiBriefText, setAiBriefText] = useState<string | null>(null);
   const [aiBriefLoading, setAiBriefLoading] = useState<boolean>(false);
+  const [signedArtifactUrlInfo, setSignedArtifactUrlInfo] = useState<string | null>(null);
 
   // Public Certificate Verifier & Leaderboard State
-  const [verifyLookupId, setVerifyLookupId] = useState<string>('8848-V1-9K4M-7P2X-Q8R5-3N6W');
+  const [verifyLookupId, setVerifyLookupId] = useState<string>(
+    '8848-V1-9K4M-7P2X-Q8R5-3N6W-5T8B-2M'
+  );
   const [leaderboardMetric, setLeaderboardMetric] = useState<
     'ELEVATION_SUM' | 'VERIFIED_COUNT' | 'HIGHEST_APEX'
   >('ELEVATION_SUM');
@@ -129,42 +154,150 @@ export default function App() {
   const [testVerb, setTestVerb] = useState<ActionVerb>('APPROVE');
   const [gateTestMessage, setGateTestMessage] = useState<string | null>(null);
 
-  const activeActor = DEMO_ACTOR_PROFILES[activeActorKey] || DEMO_ACTOR_PROFILES['actor-reviewer-independent-219'];
+  const authHeaders = useCallback((): Record<string, string> => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (sessionToken) {
+      headers.Authorization = `Bearer ${sessionToken}`;
+    }
+    return headers;
+  }, [sessionToken]);
 
-  // Helper to append an immutable audit event with sequential HMAC chaining
-  const appendAuditEvent = (
-    actorRole: UserRole,
-    actorUuid: string,
-    actionType: string,
-    targetEntityType: string,
-    targetEntityId: string,
-    summary: string
-  ) => {
-    setAuditEvents((prev) => {
-      const last = prev[prev.length - 1];
-      const nextSeq = last ? last.sequenceNumber + 1 : 1;
-      const prevHmac = last ? last.currentEventHmac : 'GENESIS_0000';
-      const nowUtc = new Date().toISOString();
-      const currentHmac = computeDeterministicHmacDigest(
-        `${nextSeq}|${nowUtc}|${actorUuid}|${actionType}|${targetEntityId}|${summary}`,
-        prevHmac
-      );
-      const newEvt: AppendOnlyAuditEvent = {
-        sequenceNumber: nextSeq,
-        eventId: `AUD-8848-${String(nextSeq).padStart(4, '0')}`,
-        timestampUtc: nowUtc,
-        actorInternalUuid: actorUuid,
-        actorRole,
-        actionType,
-        targetEntityType,
-        targetEntityId,
-        summary,
-        previousEventHmac: prevHmac,
-        currentEventHmac: currentHmac,
-        wormReplicated: true,
+  const fetchBootstrapData = useCallback(async (tokenOverride?: string) => {
+    try {
+      const headers: Record<string, string> = {};
+      const tok = tokenOverride !== undefined ? tokenOverride : sessionToken;
+      if (tok) headers.Authorization = `Bearer ${tok}`;
+
+      const [bootRes, acctRes] = await Promise.all([
+        fetch('/api/v1/bootstrap', { headers }),
+        fetch('/api/v1/auth/accounts'),
+      ]);
+      if (bootRes.ok) {
+        const data = await bootRes.json();
+        if (Array.isArray(data.destinations)) setDestinations(data.destinations);
+        if (Array.isArray(data.submissions) && data.submissions.length > 0) {
+          setSubmissions(data.submissions);
+        }
+        if (Array.isArray(data.certificates)) setCertificates(data.certificates);
+        if (Array.isArray(data.auditEvents)) setAuditEvents(data.auditEvents);
+        if (data.auditChainStatus) {
+          setAuditIntegrityValid(Boolean(data.auditChainStatus.valid));
+        }
+        if (Array.isArray(data.dualControlApprovals)) {
+          setDualControlApprovals(data.dualControlApprovals);
+        }
+        if (data.sessionUser) {
+          setSessionUser(data.sessionUser);
+        }
+      }
+      if (acctRes.ok) {
+        const acctData = await acctRes.json();
+        if (Array.isArray(acctData.accounts)) {
+          setAccountsDirectory(acctData.accounts);
+        }
+      }
+    } catch {
+      // Fallback to initial state if offline
+    }
+  }, [sessionToken]);
+
+  useEffect(() => {
+    fetchBootstrapData();
+  }, [fetchBootstrapData]);
+
+  // Map current authenticated user (or public visitor) to an ActorProfile for COI preview
+  const activeActor: ActiveActorProfile = useMemo(() => {
+    if (!sessionUser) {
+      return {
+        userId: 'anonymous-visitor',
+        displayName: 'Unauthenticated Public Visitor',
+        role: 'PUBLIC_VISITOR',
+        officerCode: 'PUBLIC-VISITOR',
+        isGuideForUserIds: [],
       };
-      return [newEvt, ...prev];
-    });
+    }
+    const matchingDemo = Object.values(DEMO_ACTOR_PROFILES).find(
+      (p) => p.userId === sessionUser.userId
+    );
+    if (matchingDemo) return matchingDemo;
+    return {
+      userId: sessionUser.userId,
+      displayName: sessionUser.displayName,
+      role: sessionUser.role,
+      officerCode: sessionUser.officerCode,
+      organizationId: sessionUser.organizationId,
+      expeditionRosterGroupCode: sessionUser.expeditionRosterGroupCode,
+      isGuideForUserIds: sessionUser.isGuideForUserIds || [],
+    };
+  }, [sessionUser]);
+
+  // Authenticate with Backend Server (scrypt password + RFC 6238 TOTP MFA)
+  const handleServerLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    setWorkstationBanner(null);
+    try {
+      const res = await fetch('/api/v1/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: loginUsername,
+          password: loginPassword,
+          totpCode: loginTotp.trim() || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setWorkstationBanner({
+          type: 'ERROR',
+          text: `HTTP ${res.status} (${data.error}): ${data.message}`,
+        });
+        return;
+      }
+      setSessionToken(data.sessionToken);
+      setSessionUser(data.user);
+      setCoiAttestedByOfficer(false);
+      await fetchBootstrapData(data.sessionToken);
+      setWorkstationBanner({
+        type: 'SUCCESS',
+        text: `Authenticated server session established for ${data.user.displayName} [${data.user.role}] (MFA Verified: ${data.user.mfaVerified}).`,
+      });
+    } catch {
+      setWorkstationBanner({
+        type: 'ERROR',
+        text: 'Network error communicating with authentication server.',
+      });
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleServerLogout = async () => {
+    try {
+      if (sessionToken) {
+        await fetch('/api/v1/auth/logout', {
+          method: 'POST',
+          headers: authHeaders(),
+        });
+      }
+    } finally {
+      setSessionToken('');
+      setSessionUser(null);
+      setCoiAttestedByOfficer(false);
+      await fetchBootstrapData('');
+      setWorkstationBanner({
+        type: 'INFO',
+        text: 'Session revoked on server. Now browsing as PUBLIC_VISITOR.',
+      });
+    }
+  };
+
+  const handleSelectDirectoryAccount = (username: string) => {
+    const found = accountsDirectory.find((a) => a.username === username);
+    if (!found) return;
+    setLoginUsername(found.username);
+    setLoginPassword(found.defaultPasswordHint);
+    setLoginTotp(found.currentTotpCode || '');
   };
 
   // Format elevation helper
@@ -205,8 +338,11 @@ export default function App() {
   );
 
   const submissionTargetDestination = useMemo(
-    () => publishedDestinations.find((d) => d.id === subDestId) || publishedDestinations[0],
-    [publishedDestinations, subDestId]
+    () =>
+      publishedDestinations.find((d) => d.id === subDestId) ||
+      publishedDestinations[0] ||
+      destinations[0],
+    [publishedDestinations, destinations, subDestId]
   );
 
   const liveTelemetryPreview = useMemo(
@@ -244,361 +380,242 @@ export default function App() {
     [certificates, verifyLookupId]
   );
 
-  // Advance Destination Research Stage handler (enforces Researcher Stages 1-3 vs Governance Dual-Control Stages 4-5)
-  const handleAdvanceDestinationStage = (dest: DestinationRecord) => {
-    const stageOrder: ResearchStage[] = [
-      '1_PROPOSED',
-      '2_UNDER_RESEARCH',
-      '3_RESEARCH_COMPLETED',
-      '4_REVIEWED_AND_APPROVED',
-      '5_PUBLISHED',
-    ];
-    const currentIndex = stageOrder.indexOf(dest.researchStage);
-    if (currentIndex >= stageOrder.length - 1) return;
-    const nextStage = stageOrder[currentIndex + 1];
-
-    // Enforce Governance Dual-Control for Stages 4 and 5
-    if (
-      (nextStage === '4_REVIEWED_AND_APPROVED' || nextStage === '5_PUBLISHED') &&
-      activeActor.role !== 'FOUNDER' &&
-      activeActor.role !== 'GOVERNANCE_COMMITTEE'
-    ) {
+  // Server-Enforced Advance Destination Research Stage handler (SEC-GOV-001 & SEC-GOV-003 Dual-Control 2P)
+  const handleAdvanceDestinationStage = async (dest: DestinationRecord) => {
+    setWorkstationBanner(null);
+    try {
+      const res = await fetch(`/api/v1/destinations/${encodeURIComponent(dest.id)}/advance-stage`, {
+        method: 'POST',
+        headers: authHeaders(),
+      });
+      const data = await res.json();
+      await fetchBootstrapData();
+      if (!res.ok) {
+        setWorkstationBanner({
+          type: 'ERROR',
+          text: `HTTP ${res.status} (${data.error}): ${data.message}`,
+        });
+        return;
+      }
+      setWorkstationBanner({
+        type: data.status === 'PENDING_SECOND_PRINCIPAL' ? 'INFO' : 'SUCCESS',
+        text: data.message,
+      });
+    } catch {
       setWorkstationBanner({
         type: 'ERROR',
-        text: `RBAC & Governance Gate Blocked: Role (${activeActor.role}) cannot advance ${dest.code} to ${nextStage}. Only Dual-Control Founder / Governance Committee authority can approve Stage 4 & Stage 5 publication.`,
+        text: 'Failed to contact server for destination stage transition.',
       });
-      appendAuditEvent(
-        activeActor.role,
-        activeActor.userId,
-        'UNAUTHORIZED_STAGE_ADVANCE_BLOCKED',
-        'DESTINATION_RECORD',
-        dest.code,
-        `Blocked attempt by ${activeActor.officerCode} to transition ${dest.code} to ${nextStage} without Governance Dual-Control authority.`
-      );
-      return;
     }
-
-    setDestinations((prev) =>
-      prev.map((d) =>
-        d.id === dest.id
-          ? {
-              ...d,
-              researchStage: nextStage,
-              elevationCitationVerified:
-                nextStage === '4_REVIEWED_AND_APPROVED' || nextStage === '5_PUBLISHED',
-              publicationStatus: nextStage === '5_PUBLISHED' ? 'PUBLISHED' : 'UNPUBLISHED_DRAFT',
-            }
-          : d
-      )
-    );
-
-    appendAuditEvent(
-      activeActor.role,
-      activeActor.userId,
-      'DESTINATION_RESEARCH_STAGE_ADVANCED',
-      'DESTINATION_RECORD',
-      dest.code,
-      `Transitioned ${dest.officialNameEn} (${dest.code}) from ${dest.researchStage} to ${nextStage}.`
-    );
   };
 
-  // Submit New Achievement Application
-  const handleCreateSubmission = (e: React.FormEvent) => {
+  // Real Evidence File Upload Handler (SEC-EVID-001: SHA-256, Magic Bytes, XXE Block, GPX/EXIF Parsing)
+  const handleEvidenceFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadStatusMsg('Uploading and running server-side SHA-256 & forensic parser...');
+    try {
+      const arrayBuf = await file.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuf);
+      let binary = '';
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const contentBase64 = btoa(binary);
+
+      const lower = file.name.toLowerCase();
+      const artifactType: EvidenceArtifact['type'] = lower.endsWith('.gpx')
+        ? 'GPX_TELEMETRY'
+        : lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png')
+        ? 'RAW_EXIF_PHOTO'
+        : subTrack === 'HISTORICAL_DOCUMENTARY'
+        ? 'MINISTRY_LEGACY_CERTIFICATE'
+        : 'OFFICIAL_PERMIT_DOC';
+
+      const res = await fetch('/api/v1/evidence/upload', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          fileName: file.name,
+          artifactType,
+          destinationId: submissionTargetDestination.id,
+          permitReferenceCode: subPermitRef,
+          contentBase64,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setUploadStatusMsg(`Upload Blocked (${data.error}): ${data.message}`);
+        return;
+      }
+      const art: EvidenceArtifact = data.artifact;
+      setUploadedArtifacts((prev) => [...prev, art]);
+      if (art.extractedMetadata.recordedMaxElevationM) {
+        setSubMaxElevM(art.extractedMetadata.recordedMaxElevationM);
+      }
+      if (art.extractedMetadata.distanceSummitedFromApexM !== undefined) {
+        setSubApexDistM(art.extractedMetadata.distanceSummitedFromApexM);
+      }
+      if (art.extractedMetadata.rolling15mMaxAscentMPerHr !== undefined) {
+        setSubAscentRate(art.extractedMetadata.rolling15mMaxAscentMPerHr);
+      }
+      setUploadStatusMsg(
+        `Verified & Stored in Private Vault: ${art.fileName} (SHA-256: ${art.sha256PostUploadDigest.slice(0, 20)}...)`
+      );
+      await fetchBootstrapData();
+    } catch {
+      setUploadStatusMsg('Failed to upload evidence file to Private Vault.');
+    }
+  };
+
+  // Submit New Achievement Application via Server API
+  const handleCreateSubmission = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!subTruthDeclaration) {
-      setSubmissionFeedback(
-        'Mandatory Requirement: You must sign the Truthfulness & Anti-Fraud Declaration before submitting.'
-      );
-      return;
-    }
-
-    const newSeq = submissions.length + 101;
-    const subCode = `SUB-2026-8848-${newSeq}`;
-    const gpxDigest = computeDeterministicHmacDigest(
-      `${subCode}|${subDestId}|${subMaxElevM}|${subCompletionDate}`,
-      'SHA256_UPLOAD_SALT'
-    ).replace('hmac256:', '');
-
-    const initials = subHolderName
-      .split(' ')
-      .map((n) => `${n[0]}.`)
-      .join(' ');
-
-    const newSub: AchievementSubmission = {
-      id: `sub-queue-${newSeq}`,
-      submissionCode: subCode,
-      applicantUserId: `usr-applicant-${newSeq}`,
-      applicantDisplayName: subHolderName,
-      applicantInitials: initials,
-      applicantNationality: subNationality,
-      destinationId: submissionTargetDestination.id,
-      destinationName: submissionTargetDestination.officialNameEn,
-      destinationElevationM: submissionTargetDestination.elevationM,
-      destinationTier: submissionTargetDestination.tier,
-      routeName: submissionTargetDestination.canonicalRouteName,
-      verificationTrack: subTrack,
-      completionDateUtc: `${subCompletionDate}T06:30:00Z`,
-      applicantStory: subNarrative,
-      truthfulnessDeclarationSigned: true,
-      privacyConsent: {
-        publicIdentityMode: subIdentityConsent,
-        publicDatePrecision: subDatePrecision,
-        optInPublicLeaderboards: subLeaderboardOptIn,
-      },
-      evidenceArtifacts: [
-        {
-          id: `art-${newSeq}-gpx`,
-          type:
-            subTrack === 'STANDARD_DIGITAL'
-              ? 'GPX_TELEMETRY'
-              : 'MINISTRY_LEGACY_CERTIFICATE',
-          fileName:
-            subTrack === 'STANDARD_DIGITAL'
-              ? `${submissionTargetDestination.code.toLowerCase()}_ascent_telemetry.gpx`
-              : `${submissionTargetDestination.code.toLowerCase()}_ministry_archival_certificate.pdf`,
-          sha256PostUploadDigest: gpxDigest,
-          uploadedAtUtc: new Date().toISOString(),
-          extractedMetadata: {
-            deviceModel:
-              subTrack === 'STANDARD_DIGITAL'
-                ? 'Multi-Band GNSS + Barometric Altimeter'
-                : 'Official Ministry Archival Registry Document',
-            captureTimestampUtc: `${subCompletionDate}T06:30:00Z`,
-            recordedMaxElevationM: subMaxElevM,
-            distanceSummitedFromApexM: subApexDistM,
-            rolling15mMaxAscentMPerHr: subAscentRate,
-            residentialStartEndMasked: true,
-            permitReferenceCode: subPermitRef,
+    setSubmissionFeedback(null);
+    try {
+      const res = await fetch('/api/v1/submissions', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          destinationId: submissionTargetDestination.id,
+          verificationTrack: subTrack,
+          applicantDisplayName: subHolderName,
+          applicantNationality: subNationality,
+          completionDateUtc: `${subCompletionDate}T06:30:00Z`,
+          applicantStory: subNarrative,
+          truthfulnessDeclarationSigned: subTruthDeclaration,
+          privacyConsent: {
+            publicIdentityMode: subIdentityConsent,
+            publicDatePrecision: subDatePrecision,
+            optInPublicLeaderboards: subLeaderboardOptIn,
           },
-        },
-      ],
-      advisoryAiAssessment: {
-        modelId: 'gemini-3-flash-preview (Server-Side Advisory Only)',
-        generatedAtUtc: new Date().toISOString(),
-        advisoryRiskLevel:
-          liveTelemetryPreview.withinGeofence &&
-          liveTelemetryPreview.withinElevationBand &&
-          liveTelemetryPreview.withinKinematicAscentEnvelope
-            ? 'LOW'
-            : 'MEDIUM',
-        kinematicConsistencyNote: liveTelemetryPreview.summaryNotes.join(' · '),
-        exifForensicNote:
-          'Post-upload SHA-256 byte integrity locked. Multi-modal spatio-temporal corroboration ready for human officer evaluation.',
-        duplicateCheckNote: 'Perceptual hash scan complete: 0 duplicate collisions.',
-        disclaimer:
-          'ADVISORY AI ANALYSIS ONLY — AI has zero permission to approve or reject achievements.',
-      },
-      status: 'UNDER_REVIEW',
-      requiresDualHumanReview:
-        submissionTargetDestination.tier === 'TIER_A_EXPEDITION' ||
-        subTrack === 'HISTORICAL_DOCUMENTARY',
-      humanReviews: [],
-      submittedAtUtc: new Date().toISOString(),
-    };
-
-    setSubmissions((prev) => [newSub, ...prev]);
-    setSelectedSubmissionId(newSub.id);
-    setSubmissionFeedback(
-      `Dossier ${subCode} created and locked in Private Evidence Vault (Post-Upload SHA-256: ${gpxDigest.slice(0, 16)}...). Routed to the Independent Verification Department.`
-    );
-
-    appendAuditEvent(
-      'REGISTERED_ADVENTURER',
-      newSub.applicantUserId,
-      'ACHIEVEMENT_DOSSIER_SUBMITTED',
-      'ACHIEVEMENT_SUBMISSION',
-      subCode,
-      `Submitted ${subTrack} dossier for ${submissionTargetDestination.officialNameEn} (${submissionTargetDestination.elevationM}m).`
-    );
+          evidenceArtifactIds: uploadedArtifacts.map((a) => a.id),
+        }),
+      });
+      const data = await res.json();
+      await fetchBootstrapData();
+      if (!res.ok) {
+        setSubmissionFeedback(`HTTP ${res.status} (${data.error}): ${data.message}`);
+        return;
+      }
+      setSelectedSubmissionId(data.submission.id);
+      setUploadedArtifacts([]);
+      setSubmissionFeedback(
+        `Dossier ${data.submission.submissionCode} persisted in SQLite & Private Evidence Vault. Routed to Independent Verification Department.`
+      );
+    } catch {
+      setSubmissionFeedback('Network error submitting achievement dossier.');
+    }
   };
 
-  // Execute Human Verification Decision or Appeal Tribunal Decision
-  const handleExecuteHumanDecision = (
-    decisionType: 'APPROVE' | 'REJECT' | 'OVERTURN_AND_APPROVE' | 'UPHOLD_REJECTION'
+  // Execute Human Verification Decision or Appeal Tribunal Decision on Server (SEC-GOV-002)
+  const handleExecuteHumanDecision = async (
+    decisionType:
+      | 'APPROVE'
+      | 'REJECT'
+      | 'REQUEST_ADDITIONAL_EVIDENCE'
+      | 'OVERTURN_AND_APPROVE'
+      | 'UPHOLD_REJECTION'
   ) => {
-    const isAppeal = selectedSubmission.status === 'APPEALED';
-
-    // 1. Check Role Boundary
-    if (!isAppeal && activeActor.role !== 'VERIFICATION_OFFICER' && activeActor.role !== 'SENIOR_VERIFICATION_LEAD') {
-      setWorkstationBanner({
-        type: 'ERROR',
-        text: `Constitutional Firewall Blocked: Role (${activeActor.role}) is prohibited from making verification decisions. Only human officers of the Independent Verification Department may approve or reject submissions.`,
-      });
-      appendAuditEvent(
-        activeActor.role,
-        activeActor.userId,
-        'FIREWALL_BLOCK_NON_REVIEWER_DECISION',
-        'ACHIEVEMENT_SUBMISSION',
-        selectedSubmission.submissionCode,
-        `Blocked non-verification role (${activeActor.role}) from deciding ${selectedSubmission.submissionCode}.`
+    setWorkstationBanner(null);
+    try {
+      const res = await fetch(
+        `/api/v1/submissions/${encodeURIComponent(selectedSubmission.id)}/review`,
+        {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({
+            decision: decisionType,
+            humanRationale: reviewRationaleInput,
+            coiHumanAttestationSigned: coiAttestedByOfficer,
+          }),
+        }
       );
-      return;
-    }
-
-    if (isAppeal && activeActor.role !== 'APPEAL_OFFICER') {
+      const data = await res.json();
+      await fetchBootstrapData();
+      if (!res.ok) {
+        setWorkstationBanner({
+          type: 'ERROR',
+          text: `HTTP ${res.status} (${data.error}): ${data.message}`,
+        });
+        return;
+      }
+      if (data.newlyIssuedCertificate) {
+        setVerifyLookupId(data.newlyIssuedCertificate.verificationId);
+      }
+      setWorkstationBanner({
+        type: 'SUCCESS',
+        text: data.newlyIssuedCertificate
+          ? `Human Verification Complete (${data.submission.status}): Free 3D Badge & 128-bit CSPRNG Certificate (${data.newlyIssuedCertificate.verificationId}) issued.`
+          : `Server recorded ${decisionType}. Submission status is now ${data.submission.status}.`,
+      });
+    } catch {
       setWorkstationBanner({
         type: 'ERROR',
-        text: `Appeal Tribunal Firewall Blocked: Role (${activeActor.role}) cannot adjudicate appeals. Only members of the Independent Appeal Review Team may resolve disputed decisions.`,
+        text: 'Failed to execute human verification decision on server.',
       });
-      appendAuditEvent(
-        activeActor.role,
-        activeActor.userId,
-        'FIREWALL_BLOCK_NON_APPEAL_OFFICER',
-        'APPEAL_RECORD',
-        selectedSubmission.submissionCode,
-        `Blocked role (${activeActor.role}) from adjudicating appeal on ${selectedSubmission.submissionCode}.`
+    }
+  };
+
+  // File Formal Appeal against a Rejected Submission
+  const handleFileAppeal = async () => {
+    setWorkstationBanner(null);
+    try {
+      const res = await fetch(
+        `/api/v1/submissions/${encodeURIComponent(selectedSubmission.id)}/appeal`,
+        {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({
+            appellantGrounds: appealGroundsInput,
+            supplementaryEvidenceSummary:
+              'Attached backup barometric log & witness attestation for Independent Appeal Review Team.',
+          }),
+        }
       );
-      return;
-    }
-
-    // 2. Check 5-Signal Automated Conflict-of-Interest (COI) Engine
-    if (!activeCoiResult.overallPassed) {
+      const data = await res.json();
+      await fetchBootstrapData();
+      if (!res.ok) {
+        setWorkstationBanner({
+          type: 'ERROR',
+          text: `HTTP ${res.status} (${data.error}): ${data.message}`,
+        });
+        return;
+      }
+      setWorkstationBanner({
+        type: 'SUCCESS',
+        text: `Appeal filed (${data.submission.appealRecord?.appealId}). Original reviewer(s) hard-blocked from Appeal Tribunal.`,
+      });
+    } catch {
       setWorkstationBanner({
         type: 'ERROR',
-        text: `Automated 5-Signal COI Engine Blocked Decision: ${activeCoiResult.blockingReason}`,
+        text: 'Failed to file appeal on server.',
       });
-      appendAuditEvent(
-        activeActor.role,
-        activeActor.userId,
-        'COI_VIOLATION_ATTEMPT_BLOCKED',
-        'ACHIEVEMENT_SUBMISSION',
-        selectedSubmission.submissionCode,
-        `5-Signal COI Blocker prevented ${activeActor.officerCode} from deciding ${selectedSubmission.submissionCode}: ${activeCoiResult.blockingReason}`
+    }
+  };
+
+  // Request Short-TTL Signed URL for Private Vault Artifact (SEC-EVID-001)
+  const handleRequestSignedEvidenceUrl = async (artifactId: string) => {
+    setSignedArtifactUrlInfo(null);
+    try {
+      const res = await fetch(
+        `/api/v1/evidence/${encodeURIComponent(artifactId)}/signed-url`,
+        {
+          method: 'POST',
+          headers: authHeaders(),
+        }
       );
-      return;
+      const data = await res.json();
+      if (!res.ok) {
+        setSignedArtifactUrlInfo(`Access Denied (${data.error}): ${data.message}`);
+        return;
+      }
+      setSignedArtifactUrlInfo(
+        `Short-TTL Signed URL Issued (Expires: ${new Date(data.expiresAtEpochMs).toISOString()}): ${data.downloadPath}`
+      );
+    } catch {
+      setSignedArtifactUrlInfo('Error requesting signed evidence URL.');
     }
-
-    // 3. Check Logged Human COI Attestation Checkbox
-    if (!coiAttestedByOfficer) {
-      setWorkstationBanner({
-        type: 'ERROR',
-        text: 'Mandatory Governance Gate: You must check the Conflict-of-Interest & Blind Review Attestation box before recording a human decision.',
-      });
-      return;
-    }
-
-    const nowUtc = new Date().toISOString();
-    const decisionHmac = computeDeterministicHmacDigest(
-      `${selectedSubmission.id}|${activeActor.userId}|${decisionType}|${nowUtc}`,
-      'HUMAN_REVIEW_KEY'
-    );
-
-    const newReviewRecord = {
-      reviewId: `rev-${Date.now()}`,
-      reviewerUserId: activeActor.userId,
-      reviewerOfficerCode: activeActor.officerCode,
-      reviewerRole: activeActor.role as
-        | 'VERIFICATION_OFFICER'
-        | 'SENIOR_VERIFICATION_LEAD'
-        | 'APPEAL_OFFICER',
-      coiAutomatedCheckPassed: true,
-      coiHumanAttestationSigned: true,
-      decision: decisionType,
-      humanRationale: reviewRationaleInput,
-      decidedAtUtc: nowUtc,
-      decisionHmacSignature: decisionHmac,
-    };
-
-    const updatedReviews = [...selectedSubmission.humanReviews, newReviewRecord];
-    const approvalCount = updatedReviews.filter(
-      (r) => r.decision === 'APPROVE' || r.decision === 'OVERTURN_AND_APPROVE'
-    ).length;
-
-    let nextStatus = selectedSubmission.status;
-    let newlyIssuedCert: PublicCertificateRecord | null = null;
-
-    if (decisionType === 'REJECT' || decisionType === 'UPHOLD_REJECTION') {
-      nextStatus = 'REJECTED';
-    } else if (
-      decisionType === 'OVERTURN_AND_APPROVE' ||
-      !selectedSubmission.requiresDualHumanReview ||
-      approvalCount >= 2
-    ) {
-      nextStatus = 'APPROVED';
-      const verificationId = generateNonEnumerableVerificationId(certificates.length + 10);
-      const destObj =
-        destinations.find((d) => d.id === selectedSubmission.destinationId) || destinations[0];
-
-      const publicNameDisplay =
-        selectedSubmission.privacyConsent.publicIdentityMode === 'FULL_VERIFIED_NAME'
-          ? selectedSubmission.applicantDisplayName
-          : selectedSubmission.privacyConsent.publicIdentityMode === 'DISPLAY_HANDLE_OR_INITIALS'
-          ? `${selectedSubmission.applicantInitials} (Initials Consent Mode)`
-          : 'Private Credential Holder (Identity Redacted by Holder Consent)';
-
-      const rawDate = selectedSubmission.completionDateUtc.slice(0, 10);
-      const publicDateDisplay =
-        selectedSubmission.privacyConsent.publicDatePrecision === 'EXACT_DATE'
-          ? rawDate
-          : selectedSubmission.privacyConsent.publicDatePrecision === 'MONTH_AND_YEAR_ONLY'
-          ? rawDate.slice(0, 7)
-          : rawDate.slice(0, 4);
-
-      newlyIssuedCert = {
-        verificationId,
-        submissionId: selectedSubmission.id,
-        holderUserId: selectedSubmission.applicantUserId,
-        holderPublicDisplay: publicNameDisplay,
-        holderPrivacyMode: selectedSubmission.privacyConsent.publicIdentityMode,
-        holderNationality: selectedSubmission.applicantNationality,
-        destinationId: destObj.id,
-        destinationCode: destObj.code,
-        destinationNameEn: destObj.officialNameEn,
-        destinationNameNe: destObj.officialNameNe,
-        verifiedElevationM: destObj.elevationM,
-        verifiedElevationFt: destObj.elevationFt,
-        elevationSourceCitation: destObj.elevationReferenceSource,
-        routeName: selectedSubmission.routeName,
-        verificationTrack: selectedSubmission.verificationTrack,
-        publicCompletionDateDisplay: publicDateDisplay,
-        issuedAtUtc: nowUtc,
-        status: 'VALID',
-        reviewingOfficersCodes: updatedReviews.map((r) => r.reviewerOfficerCode),
-        badgeCode: destObj.badgeIdentity.badgeCode,
-        certificateIntegrityDigest: decisionHmac.replace('hmac256:', ''),
-        optInPublicLeaderboards: selectedSubmission.privacyConsent.optInPublicLeaderboards,
-      };
-    } else {
-      nextStatus = 'AWAITING_SECOND_REVIEW';
-    }
-
-    setSubmissions((prev) =>
-      prev.map((s) =>
-        s.id === selectedSubmission.id
-          ? {
-              ...s,
-              status: nextStatus,
-              humanReviews: updatedReviews,
-              issuedCertificateId: newlyIssuedCert
-                ? newlyIssuedCert.verificationId
-                : s.issuedCertificateId,
-            }
-          : s
-      )
-    );
-
-    if (newlyIssuedCert) {
-      setCertificates((prev) => [newlyIssuedCert!, ...prev]);
-      setVerifyLookupId(newlyIssuedCert.verificationId);
-    }
-
-    appendAuditEvent(
-      activeActor.role,
-      activeActor.userId,
-      `HUMAN_REVIEW_${decisionType}`,
-      'ACHIEVEMENT_SUBMISSION',
-      selectedSubmission.submissionCode,
-      `Officer ${activeActor.officerCode} recorded ${decisionType} on ${selectedSubmission.submissionCode} -> Status: ${nextStatus}.${
-        newlyIssuedCert ? ` Free Certificate Issued: ${newlyIssuedCert.verificationId}` : ''
-      }`
-    );
-
-    setWorkstationBanner({
-      type: 'SUCCESS',
-      text: newlyIssuedCert
-        ? `Human Verification Complete (${nextStatus}): Free 3D Badge & Official Certificate (${newlyIssuedCert.verificationId}) issued and indexed on public verifier.`
-        : `Decision (${decisionType}) recorded by ${activeActor.officerCode}. Current dossier state: ${nextStatus}.`,
-    });
   };
 
   // Trigger Server-Side Advisory AI Brief (Non-Decisional)
@@ -608,16 +625,14 @@ export default function App() {
     try {
       const response = await fetch('/api/v1/ai/advisory-brief', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
         body: JSON.stringify({
+          destinationId: selectedSubmission.destinationId,
           destinationCode: selectedSubmission.destinationId.toUpperCase(),
-          destinationName: selectedSubmission.destinationName,
-          elevationM: selectedSubmission.destinationElevationM,
-          routeName: selectedSubmission.routeName,
         }),
       });
       const data = await response.json();
-      setAiBriefText(`[${data.source}] ${data.summary}`);
+      setAiBriefText(`[${data.source}] ${data.briefing}`);
     } catch {
       setAiBriefText(
         '[DETERMINISTIC_FORENSIC_FALLBACK] Advisory check: Corroborate GPX apex geofence intersection, barometric altitude channel, raw EXIF solar azimuth, and official permit.'
@@ -627,60 +642,101 @@ export default function App() {
     }
   };
 
-  // Dual-Control Certificate Revocation or GDPR User Erasure Simulation
-  const handleCertificateLifecycleAction = (
+  // Dual-Control Certificate Revocation or GDPR User Erasure via Server API (SEC-GOV-003 & SEC-PRIV-001)
+  const handleCertificateLifecycleAction = async (
     cert: PublicCertificateRecord,
     mode: 'DUAL_CONTROL_REVOKE' | 'GDPR_USER_ERASURE_SHRED'
   ) => {
-    if (
-      mode === 'DUAL_CONTROL_REVOKE' &&
-      activeActor.role !== 'FOUNDER' &&
-      activeActor.role !== 'GOVERNANCE_COMMITTEE' &&
-      activeActor.role !== 'SENIOR_VERIFICATION_LEAD'
-    ) {
+    setWorkstationBanner(null);
+    try {
+      if (mode === 'DUAL_CONTROL_REVOKE') {
+        const res = await fetch(
+          `/api/v1/certificates/${encodeURIComponent(cert.verificationId)}/revoke`,
+          {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({
+              reason:
+                'REVOKED under Dual-Control Governance Resolution: Post-issuance audit invalidated achievement. Removed from public standings.',
+            }),
+          }
+        );
+        const data = await res.json();
+        await fetchBootstrapData();
+        if (!res.ok) {
+          setWorkstationBanner({
+            type: 'ERROR',
+            text: `HTTP ${res.status} (${data.error}): ${data.message}`,
+          });
+          return;
+        }
+        setWorkstationBanner({
+          type: data.status === 'PENDING_SECOND_PRINCIPAL' ? 'INFO' : 'SUCCESS',
+          text: data.message,
+        });
+      } else {
+        const res = await fetch('/api/v1/privacy/erasure', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ targetUserId: cert.holderUserId }),
+        });
+        const data = await res.json();
+        await fetchBootstrapData();
+        if (!res.ok) {
+          setWorkstationBanner({
+            type: 'ERROR',
+            text: `HTTP ${res.status} (${data.error}): ${data.message}`,
+          });
+          return;
+        }
+        setWorkstationBanner({
+          type: 'SUCCESS',
+          text: `Executed AES-256-GCM key-shredding erasure for ${data.shreddedUserId}. Deactivated ${data.deactivatedCertificatesCount} certificate(s) while preserving WORM audit chain.`,
+        });
+      }
+    } catch {
       setWorkstationBanner({
         type: 'ERROR',
-        text: `Dual-Control Revocation Blocked: Role (${activeActor.role}) cannot revoke issued certificates.`,
+        text: 'Failed to execute certificate lifecycle action on server.',
       });
-      return;
     }
+  };
 
-    setCertificates((prev) =>
-      prev.map((c) => {
-        if (c.verificationId !== cert.verificationId) return c;
-        if (mode === 'DUAL_CONTROL_REVOKE') {
-          return {
-            ...c,
-            status: 'REVOKED',
-            optInPublicLeaderboards: false,
-            revocationOrCorrectionNote:
-              'REVOKED under Dual-Control Governance Resolution: Post-issuance audit invalidated achievement. Removed from public standings.',
-          };
+  // Toggle Post-Issuance Leaderboard Opt-In (SEC-PRIV-001)
+  const handleToggleCertificateLeaderboard = async (cert: PublicCertificateRecord) => {
+    setWorkstationBanner(null);
+    try {
+      const res = await fetch(
+        `/api/v1/certificates/${encodeURIComponent(cert.verificationId)}/privacy`,
+        {
+          method: 'PATCH',
+          headers: authHeaders(),
+          body: JSON.stringify({
+            publicIdentityMode: cert.holderPrivacyMode,
+            publicDatePrecision: cert.holderDatePrecision,
+            optInPublicLeaderboards: !cert.optInPublicLeaderboards,
+          }),
         }
-        return {
-          ...c,
-          status: 'DEACTIVATED_BY_USER_ERASURE',
-          holderPublicDisplay: 'Erased under GDPR Key-Shredding (user_dek Destroyed)',
-          holderNationality: 'Erased',
-          optInPublicLeaderboards: false,
-          revocationOrCorrectionNote:
-            'Record deactivated at the request of the credential holder (Correction 2.5). Personal identity erased from user_pii_vault; anonymized cryptographic audit chain preserved.',
-        };
-      })
-    );
-
-    appendAuditEvent(
-      activeActor.role,
-      activeActor.userId,
-      mode === 'DUAL_CONTROL_REVOKE'
-        ? 'CERTIFICATE_REVOKED_DUAL_CONTROL'
-        : 'USER_PII_ERASURE_KEY_SHREDDED',
-      'PUBLIC_CERTIFICATE',
-      cert.verificationId,
-      mode === 'DUAL_CONTROL_REVOKE'
-        ? `Executed Dual-Control Revocation on certificate ${cert.verificationId}; recalculated verified leaderboards.`
-        : `Shredded user_dek in user_pii_vault and transitioned certificate ${cert.verificationId} to DEACTIVATED_BY_USER_ERASURE while keeping WORM audit chain intact.`
-    );
+      );
+      const data = await res.json();
+      await fetchBootstrapData();
+      if (!res.ok) {
+        setWorkstationBanner({
+          type: 'ERROR',
+          text: `HTTP ${res.status} (${data.error}): ${data.message}`,
+        });
+        return;
+      }
+      setWorkstationBanner({
+        type: 'SUCCESS',
+        text: `Updated leaderboard opt-in preference for certificate ${cert.verificationId}.`,
+      });
+    } catch {
+      setWorkstationBanner({
+        type: 'ERROR',
+        text: 'Failed to update certificate privacy preference.',
+      });
+    }
   };
 
   // Test Hard-Locked Payment & Blockchain Endpoints
@@ -777,7 +833,6 @@ export default function App() {
           Zone 1: Single wordmark | Zone 2: 5 single-line nav links | Zone 3: 1 primary CTA
       ===================================================================== */}
       <header className="sticky top-0 z-40 bg-[#0A0A0A]/95 backdrop-blur-md border-b border-[#C9A86A]/25 px-6 py-4 flex items-center justify-between gap-8">
-        {/* Zone 1: Single text element wordmark */}
         <a
           href="#top"
           onClick={(e) => {
@@ -789,7 +844,6 @@ export default function App() {
           0 TO 8848
         </a>
 
-        {/* Zone 2: 5 concise single-line navigation links */}
         <nav className="hidden lg:flex items-center gap-7 text-sm font-medium text-[#A1A1AA]">
           <button
             type="button"
@@ -848,7 +902,6 @@ export default function App() {
           </button>
         </nav>
 
-        {/* Zone 3: 1 primary action */}
         <div className="flex items-center shrink-0">
           <button
             type="button"
@@ -861,7 +914,7 @@ export default function App() {
       </header>
 
       {/* =====================================================================
-          OPERATIONAL GOVERNANCE & ROLE SIMULATION TOOLBAR (Below Header)
+          SERVER-SIDE AUTHENTICATION & MFA SESSION BAR (SEC-AUTH-001)
       ===================================================================== */}
       <div className="bg-[#121214] border-b border-white/10 px-6 py-2.5">
         <div className="max-w-[1400px] mx-auto flex flex-wrap items-center justify-between gap-4 text-xs">
@@ -879,8 +932,8 @@ export default function App() {
             </span>
           </div>
 
-          {/* Mobile Section Switcher + Role Simulation + Language & Units */}
           <div className="flex flex-wrap items-center gap-3">
+            {/* Mobile Section Switcher */}
             <div className="flex lg:hidden items-center gap-1 bg-[#18181B] p-1 rounded-lg border border-white/10">
               {(
                 [
@@ -906,24 +959,62 @@ export default function App() {
               ))}
             </div>
 
-            <label className="flex items-center gap-2 text-[#A1A1AA]">
-              <span className="whitespace-nowrap">Active Role Context:</span>
-              <select
-                value={activeActorKey}
-                onChange={(e) => {
-                  setActiveActorKey(e.target.value);
-                  setCoiAttestedByOfficer(false);
-                  setWorkstationBanner(null);
-                }}
-                className="bg-[#18181B] text-white border border-[#C9A86A]/40 rounded px-2.5 py-1 text-xs focus:outline-none focus:border-[#FFD700]"
-              >
-                {Object.entries(DEMO_ACTOR_PROFILES).map(([key, prof]) => (
-                  <option key={key} value={key}>
-                    {prof.displayName} [{prof.role}]
-                  </option>
-                ))}
-              </select>
-            </label>
+            {sessionUser ? (
+              <div className="flex flex-wrap items-center gap-2 bg-[#18181B] border border-emerald-500/40 rounded-lg px-3 py-1">
+                <KeyRound className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="text-white font-medium">
+                  {sessionUser.displayName} [{sessionUser.role}]
+                </span>
+                <span className="font-mono-tabular text-[11px] text-emerald-400">
+                  {sessionUser.mfaVerified ? 'MFA:VERIFIED' : 'SESSION:ACTIVE'}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleServerLogout}
+                  className="ml-1 px-2 py-0.5 rounded bg-red-950/80 border border-red-500/40 text-red-200 hover:bg-red-900 flex items-center gap-1"
+                >
+                  <LogOut className="w-3 h-3" />
+                  <span>Logout</span>
+                </button>
+              </div>
+            ) : (
+              <form onSubmit={handleServerLogin} className="flex flex-wrap items-center gap-2">
+                <select
+                  value={loginUsername}
+                  onChange={(e) => handleSelectDirectoryAccount(e.target.value)}
+                  className="bg-[#18181B] text-white border border-[#C9A86A]/40 rounded px-2 py-1 text-xs"
+                  aria-label="Select test account"
+                >
+                  {accountsDirectory.map((acc) => (
+                    <option key={acc.userId} value={acc.username}>
+                      {acc.displayName} [{acc.role}]{' '}
+                      {acc.currentTotpCode ? `(TOTP: ${acc.currentTotpCode})` : ''}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  type="password"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  placeholder="Password"
+                  className="w-28 bg-[#18181B] text-white border border-white/15 rounded px-2 py-1 text-xs"
+                />
+                <input
+                  type="text"
+                  value={loginTotp}
+                  onChange={(e) => setLoginTotp(e.target.value)}
+                  placeholder="TOTP MFA"
+                  className="w-24 bg-[#18181B] text-[#FFD700] border border-white/15 rounded px-2 py-1 text-xs font-mono-tabular"
+                />
+                <button
+                  type="submit"
+                  disabled={authLoading}
+                  className="px-2.5 py-1 rounded bg-[#C9A86A] text-[#0A0A0A] font-semibold hover:bg-[#FFD700] transition-colors"
+                >
+                  {authLoading ? 'Signing in...' : 'Server Login'}
+                </button>
+              </form>
+            )}
 
             <div className="flex items-center gap-1 bg-[#18181B] p-0.5 rounded border border-white/10">
               <button
@@ -974,7 +1065,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* Global Notification Banner for Governance / RBAC Feedback */}
+      {/* Global Notification Banner for Server Governance / RBAC Feedback */}
       {workstationBanner && (
         <div
           className={`px-6 py-3 border-b text-xs flex items-center justify-between gap-4 ${
@@ -1014,7 +1105,6 @@ export default function App() {
         =================================================================== */}
         {activeSection === 'DESTINATIONS' && (
           <>
-            {/* Hero Split Section */}
             <section className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch">
               <div className="lg:col-span-7 flex flex-col justify-between bg-[#121214] border border-white/10 rounded-2xl p-8">
                 <div className="space-y-5">
@@ -1041,7 +1131,6 @@ export default function App() {
                       : 'छ महाद्वीपका १०० प्रमुख साहसिक गन्तव्यहरूमा मानव उपलब्धिको विश्वव्यापी प्रमाणीकरण प्लेटफर्म। प्रत्येक उपलब्धि स्वतन्त्र मानवीय परीक्षण र बहु-आयामिक प्रमाणद्वारा प्रमाणित हुन्छ।'}
                   </p>
 
-                  {/* Five Permanent Principles */}
                   <div className="pt-4 border-t border-white/10 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs text-[#A1A1AA]">
                     <div>01. Every Adventurer Deserves Respect.</div>
                     <div>02. Every Achievement Deserves Recognition.</div>
@@ -1071,7 +1160,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Hero Visual Frame with Measured Contrast Scrim */}
               <div className="lg:col-span-5 relative rounded-2xl overflow-hidden border border-[#C9A86A]/30 min-h-[340px] bg-[#121214] flex flex-col justify-end">
                 <img
                   src={HERO_EVEREST_IMG}
@@ -1092,7 +1180,7 @@ export default function App() {
                     Mount Everest · सगरमाथा
                   </h2>
                   <p className="text-xs text-neutral-300">
-                    Survey Department of Nepal (2020 Official Joint Trigonometric & GNSS Survey) · Stage 5 Published
+                    Survey Department of Nepal (2020 Official Joint Trigonometric & GNSS Survey) · Dual-Control Published
                   </p>
                 </div>
               </div>
@@ -1115,7 +1203,7 @@ export default function App() {
                   {stageCounts.published} Published · {100 - stageCounts.published} In Research
                 </p>
                 <p className="text-xs text-[#A1A1AA] mt-1">
-                  Unverified destination data is never presented as confirmed
+                  Stage 4 & 5 require Two-Person (2P) Dual-Control governance approval
                 </p>
               </div>
               <div className="bg-[#121214] border border-white/10 rounded-xl p-5">
@@ -1133,7 +1221,7 @@ export default function App() {
                   Badges & Certs: Free
                 </p>
                 <p className="text-xs text-[#A1A1AA] mt-1">
-                  Payments & Blockchain hard-locked (FALSE) until legal & security gates
+                  Payments & Blockchain hard-locked (HTTP 503) until legal & security gates
                 </p>
               </div>
             </section>
@@ -1195,7 +1283,6 @@ export default function App() {
 
             {/* Interactive 100-Destination Catalog & 5-Stage Research Inspector */}
             <section className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-              {/* Left 7 Columns: Filterable 100-Destination Registry Table */}
               <div className="lg:col-span-7 bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-5">
                 <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/10 pb-4">
                   <div>
@@ -1207,7 +1294,6 @@ export default function App() {
                     </p>
                   </div>
 
-                  {/* Search Input */}
                   <div className="relative w-full sm:w-64">
                     <Search className="w-4 h-4 text-[#A1A1AA] absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
@@ -1220,7 +1306,7 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Interactive Region Segmented Filter Buttons */}
+                {/* Region Filter Buttons */}
                 <div className="flex flex-wrap items-center gap-1.5 bg-[#18181B] p-1.5 rounded-lg border border-white/10">
                   {(
                     [
@@ -1249,7 +1335,7 @@ export default function App() {
                   ))}
                 </div>
 
-                {/* Interactive 5-Stage Research Pipeline Filter Buttons */}
+                {/* 5-Stage Research Pipeline Filter Buttons */}
                 <div className="flex flex-wrap items-center gap-1.5 bg-[#18181B] p-1.5 rounded-lg border border-white/10">
                   {(
                     [
@@ -1373,7 +1459,7 @@ export default function App() {
                     </div>
                     <p className="text-[#A1A1AA]">
                       {selectedDestination.researchStage === '5_PUBLISHED'
-                        ? 'Confirmed & Published: Geodetic survey citation and safety criteria verified by Governance Committee. Open for achievement submissions.'
+                        ? 'Confirmed & Published: Geodetic survey citation and safety criteria verified by Two-Person (2P) Dual-Control Governance. Open for achievement submissions.'
                         : 'UNPUBLISHED RESEARCH RECORD: In accordance with Phase 09 rules, unverified destination data is never presented as confirmed and cannot accept achievement submissions until Stage 5.'}
                     </p>
                     {selectedDestination.researchStage !== '5_PUBLISHED' && (
@@ -1382,12 +1468,11 @@ export default function App() {
                         onClick={() => handleAdvanceDestinationStage(selectedDestination)}
                         className="w-full mt-2 px-3 py-2 text-xs font-semibold bg-[#C9A86A] text-[#0A0A0A] hover:bg-[#FFD700] rounded transition-colors"
                       >
-                        Advance Research Stage (Current Role: {activeActor.role})
+                        Server Advance Research Stage (Session Role: {activeActor.role})
                       </button>
                     )}
                   </div>
 
-                  {/* 16-Attribute Definition List */}
                   <dl className="divide-y divide-white/10 text-xs">
                     <div className="py-2 flex justify-between gap-4">
                       <dt className="text-[#A1A1AA]">Target / Verified Elevation</dt>
@@ -1462,13 +1547,13 @@ export default function App() {
             <div className="lg:col-span-7 bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-6">
               <div className="border-b border-white/10 pb-4">
                 <p className="text-xs text-[#C9A86A] font-mono-tabular">
-                  PHASE 11 · MULTI-MODAL EVIDENCE DOSSIER & PRIVACY ENGINE
+                  PHASE 11 · MULTI-MODAL EVIDENCE DOSSIER & PRIVACY ENGINE (SEC-EVID-001)
                 </p>
                 <h2 className="font-display text-2xl font-bold text-white mt-1">
                   Submit Achievement Application
                 </h2>
                 <p className="text-xs text-[#A1A1AA] mt-1">
-                  All raw GPX tracks, EXIF photos, and permits are isolated in the Private Evidence Vault. Start/end residential coordinates are masked automatically.
+                  All raw GPX tracks, EXIF photos, and permits are validated for magic bytes & XXE, hashed with NIST SHA-256 from raw bytes, and isolated in the Private Evidence Vault.
                 </p>
               </div>
 
@@ -1514,6 +1599,46 @@ export default function App() {
                   </label>
                 </div>
 
+                {/* Real Evidence File Upload Widget */}
+                <div className="p-4 rounded-xl bg-[#18181B] border border-[#C9A86A]/35 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-semibold text-[#FFD700]">
+                      Upload Evidence File to Private Vault (.gpx, .jpg, .png, .pdf)
+                    </span>
+                    <span className="font-mono-tabular text-[11px] text-[#A1A1AA]">
+                      NIST SHA-256 + XXE & Magic-Byte Enforced
+                    </span>
+                  </div>
+                  <input
+                    type="file"
+                    accept=".gpx,.xml,.jpg,.jpeg,.png,.pdf"
+                    onChange={handleEvidenceFileUpload}
+                    className="w-full text-xs text-neutral-300 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-[#C9A86A] file:text-[#0A0A0A] hover:file:bg-[#FFD700]"
+                  />
+                  {uploadStatusMsg && (
+                    <p className="text-[11px] font-mono-tabular text-emerald-400">
+                      {uploadStatusMsg}
+                    </p>
+                  )}
+                  {uploadedArtifacts.length > 0 && (
+                    <div className="space-y-1 pt-1">
+                      {uploadedArtifacts.map((art) => (
+                        <div
+                          key={art.id}
+                          className="text-[11px] font-mono-tabular text-neutral-300 flex items-center justify-between"
+                        >
+                          <span>
+                            [{art.type}] {art.fileName}
+                          </span>
+                          <span className="text-[#C9A86A]">
+                            SHA-256: {art.sha256PostUploadDigest.slice(0, 16)}...
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <label className="space-y-1.5 block">
                     <span className="text-[#A1A1AA]">Adventurer Full Name</span>
@@ -1547,7 +1672,7 @@ export default function App() {
                   </label>
                 </div>
 
-                {/* Telemetry Simulation Inputs */}
+                {/* Telemetry Parameters */}
                 <div className="p-4 rounded-xl bg-[#18181B] border border-white/10 space-y-4">
                   <div className="flex items-center justify-between">
                     <span className="font-semibold text-[#C9A86A]">
@@ -1612,7 +1737,7 @@ export default function App() {
                   </label>
                 </div>
 
-                {/* Granular Holder Privacy Consent (Correction 2.9) */}
+                {/* Granular Holder Privacy Consent */}
                 <div className="p-4 rounded-xl bg-[#18181B] border border-white/10 space-y-3">
                   <p className="font-semibold text-white">
                     Granular Public Verification & Privacy Consent (Correction 2.9)
@@ -1714,7 +1839,6 @@ export default function App() {
               </form>
             </div>
 
-            {/* Right 5 Columns: Live Contextual Telemetry & Integrity vs Authenticity Explainer */}
             <div className="lg:col-span-5 space-y-6">
               <div className="bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-4">
                 <h3 className="font-display text-lg font-bold text-white">
@@ -1758,7 +1882,6 @@ export default function App() {
         =================================================================== */}
         {activeSection === 'VERIFICATION_APPEALS' && (
           <section className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-            {/* Left 4 Columns: Verification & Appeal Queue */}
             <div className="lg:col-span-4 bg-[#121214] border border-white/10 rounded-2xl p-5 space-y-4">
               <div className="border-b border-white/10 pb-3">
                 <p className="text-xs text-[#C9A86A] font-mono-tabular">
@@ -1782,6 +1905,7 @@ export default function App() {
                         setSelectedSubmissionId(sub.id);
                         setCoiAttestedByOfficer(false);
                         setAiBriefText(null);
+                        setSignedArtifactUrlInfo(null);
                       }}
                       className={`cursor-pointer p-4 rounded-xl border transition-colors space-y-2 ${
                         isSelected
@@ -1819,7 +1943,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Right 8 Columns: Forensic Workstation, 5-Signal COI Gate & Human Decision Panel */}
             <div className="lg:col-span-8 bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-6">
               <div className="flex flex-wrap items-start justify-between gap-4 border-b border-white/10 pb-4">
                 <div>
@@ -1850,7 +1973,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* 5-Signal Automated Conflict-of-Interest (COI) Gate (Correction 2.6) */}
+              {/* 5-Signal Automated Conflict-of-Interest (COI) Gate */}
               <div
                 className={`p-4 rounded-xl border space-y-3 ${
                   activeCoiResult.overallPassed
@@ -1866,7 +1989,7 @@ export default function App() {
                       <ShieldAlert className="w-4 h-4 text-red-400" />
                     )}
                     <span className="text-xs font-semibold text-white">
-                      Automated 5-Signal Conflict-of-Interest Check for: {activeActor.displayName}
+                      Automated 5-Signal Conflict-of-Interest Check for: {activeActor.displayName} [{activeActor.role}]
                     </span>
                   </div>
                   <span
@@ -1913,9 +2036,18 @@ export default function App() {
                         <span className="font-semibold text-white">
                           [{art.type}] {art.fileName}
                         </span>
-                        <span className="font-mono-tabular text-[11px] text-[#C9A86A]">
-                          Post-Upload SHA-256: {art.sha256PostUploadDigest.slice(0, 24)}...
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono-tabular text-[11px] text-[#C9A86A]">
+                            SHA-256: {art.sha256PostUploadDigest.slice(0, 20)}...
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleRequestSignedEvidenceUrl(art.id)}
+                            className="px-2 py-0.5 rounded bg-[#121214] border border-[#C9A86A]/40 text-[#FFD700] hover:border-[#FFD700] text-[11px]"
+                          >
+                            Request Signed Vault Token
+                          </button>
+                        </div>
                       </div>
                       <div className="text-[#A1A1AA] flex flex-wrap items-center gap-2">
                         {art.extractedMetadata.deviceModel && (
@@ -1940,9 +2072,14 @@ export default function App() {
                     </div>
                   ))}
                 </div>
+                {signedArtifactUrlInfo && (
+                  <div className="p-2.5 rounded-lg bg-[#18181B] border border-[#C9A86A]/40 font-mono-tabular text-[11px] text-[#FFD700]">
+                    {signedArtifactUrlInfo}
+                  </div>
+                )}
               </div>
 
-              {/* Advisory AI Forensic Panel (Strictly Non-Decisional) */}
+              {/* Advisory AI Forensic Panel */}
               <div className="p-4 rounded-xl bg-[#18181B] border border-[#C9A86A]/30 space-y-2.5 text-xs">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
@@ -1978,7 +2115,7 @@ export default function App() {
                 </p>
               </div>
 
-              {/* Appeal Tribunal Box (If Submission is APPEALED) */}
+              {/* Appeal Tribunal Box */}
               {selectedSubmission.appealRecord && (
                 <div className="p-4 rounded-xl bg-amber-950/30 border border-amber-500/40 space-y-2 text-xs">
                   <div className="font-semibold text-amber-300">
@@ -2040,7 +2177,7 @@ export default function App() {
 
                 <label className="space-y-1 block">
                   <span className="text-[#A1A1AA]">
-                    Human Verification / Appeal Rationale (Logged to Append-Only WORM Audit Trail)
+                    Human Verification / Appeal Rationale (Logged to Append-Only SQLite Audit Trail)
                   </span>
                   <textarea
                     rows={2}
@@ -2078,10 +2215,38 @@ export default function App() {
                     </button>
                     <button
                       type="button"
+                      onClick={() => handleExecuteHumanDecision('REQUEST_ADDITIONAL_EVIDENCE')}
+                      className="px-4 py-2.5 rounded-lg font-semibold bg-[#18181B] border border-[#C9A86A]/40 text-[#FFD700] hover:border-[#FFD700] transition-colors"
+                    >
+                      Request Additional Evidence
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => handleExecuteHumanDecision('REJECT')}
                       className="px-4 py-2.5 rounded-lg font-semibold bg-red-900/80 border border-red-500/50 text-red-100 hover:bg-red-800 transition-colors"
                     >
                       Reject Submission with Structured Reason
+                    </button>
+                  </div>
+                )}
+
+                {selectedSubmission.status === 'REJECTED' && (
+                  <div className="pt-3 border-t border-white/10 space-y-2">
+                    <p className="font-semibold text-amber-300">
+                      Adventurer Right of Appeal (Routes to Independent Appeal Review Team)
+                    </p>
+                    <input
+                      type="text"
+                      value={appealGroundsInput}
+                      onChange={(e) => setAppealGroundsInput(e.target.value)}
+                      className="w-full bg-[#18181B] border border-white/15 rounded px-3 py-1.5 text-white"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleFileAppeal}
+                      className="px-3.5 py-2 rounded bg-amber-500 text-[#0A0A0A] font-semibold hover:bg-amber-400 transition-colors"
+                    >
+                      File Formal Appeal on Server
                     </button>
                   </div>
                 )}
@@ -2095,7 +2260,6 @@ export default function App() {
         =================================================================== */}
         {activeSection === 'CERTIFICATES_STANDINGS' && (
           <div className="space-y-12">
-            {/* Public Verification Lookup Portal */}
             <section className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
               <div className="lg:col-span-5 bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-5">
                 <div>
@@ -2152,7 +2316,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Official Public Certificate Dossier View */}
               <div className="lg:col-span-7">
                 {lookedUpCertificate ? (
                   <div className="bg-[#121214] border-2 border-[#C9A86A] rounded-2xl p-8 space-y-6 relative">
@@ -2195,7 +2358,9 @@ export default function App() {
 
                     <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
                       <div className="p-3.5 rounded-lg bg-[#18181B] border border-white/10">
-                        <dt className="text-[#A1A1AA]">Credential Holder (Consent Mode: {lookedUpCertificate.holderPrivacyMode})</dt>
+                        <dt className="text-[#A1A1AA]">
+                          Credential Holder (Consent Mode: {lookedUpCertificate.holderPrivacyMode})
+                        </dt>
                         <dd className="text-base font-semibold text-white mt-1">
                           {lookedUpCertificate.holderPublicDisplay}
                         </dd>
@@ -2244,6 +2409,15 @@ export default function App() {
                         <div className="flex flex-wrap items-center gap-2">
                           <button
                             type="button"
+                            onClick={() => handleToggleCertificateLeaderboard(lookedUpCertificate)}
+                            className="px-3 py-1.5 rounded bg-[#18181B] border border-[#C9A86A]/40 text-[#FFD700] hover:border-[#FFD700] transition-colors"
+                          >
+                            {lookedUpCertificate.optInPublicLeaderboards
+                              ? 'Opt-Out of Public Leaderboard'
+                              : 'Opt-In to Public Leaderboard'}
+                          </button>
+                          <button
+                            type="button"
                             onClick={() =>
                               handleCertificateLifecycleAction(
                                 lookedUpCertificate,
@@ -2252,7 +2426,7 @@ export default function App() {
                             }
                             className="px-3 py-1.5 rounded bg-[#18181B] border border-white/15 text-neutral-300 hover:text-white transition-colors"
                           >
-                            Simulate GDPR Key-Shredding Erasure (Correction 2.5)
+                            Execute AES-256-GCM Key-Shredding Erasure
                           </button>
                           <button
                             type="button"
@@ -2264,7 +2438,7 @@ export default function App() {
                             }
                             className="px-3 py-1.5 rounded bg-red-950/70 border border-red-500/40 text-red-200 hover:bg-red-900 transition-colors"
                           >
-                            Execute Dual-Control Revocation
+                            Execute Dual-Control (2P) Revocation
                           </button>
                         </div>
                       )}
@@ -2283,7 +2457,7 @@ export default function App() {
               </div>
             </section>
 
-            {/* Verified Achievement Leaderboards (Phase 14) */}
+            {/* Verified Achievement Leaderboards */}
             <section className="bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-5">
               <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/10 pb-4">
                 <div>
@@ -2367,82 +2541,64 @@ export default function App() {
         =================================================================== */}
         {activeSection === 'GOVERNANCE_PHASES' && (
           <div className="space-y-12">
-            {/* Interactive 1,680-Permutation RBAC Matrix Tester & Hard-Lock Verifier */}
             <section className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+              {/* 1,680-Permutation RBAC Matrix Tester */}
               <div className="lg:col-span-6 bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-5">
                 <div>
                   <p className="text-xs text-[#C9A86A] font-mono-tabular">
-                    PHASE 07 & DOC-P01-08 · 15-ROLE × 14-RESOURCE × 8-VERB RBAC ENGINE
+                    SEC-RBAC-001 · 15-ROLE × 14-RESOURCE × 8-VERB RBAC ENGINE (1,680 PERMUTATIONS)
                   </p>
                   <h2 className="font-display text-xl font-bold text-white mt-1">
-                    Interactive Permission & Firewall Matrix Tester
+                    Strict Deny-By-Default Permission Matrix Tester
                   </h2>
                   <p className="text-xs text-[#A1A1AA] mt-1">
-                    Test any combination of User Role, Platform Resource, and Action Verb (`Read`, `Create`, `Update`, `Delete`, `Approve`, `Reject`, `Publish`, `Revoke`).
+                    Inspect all 15 roles, 14 resource domains, and 8 action verbs. Zero permissive catch-all fallbacks exist.
                   </p>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
                   <label className="space-y-1 block">
-                    <span className="text-[#A1A1AA]">1. Select User Role</span>
+                    <span className="text-[#A1A1AA]">1. Select User Role (15)</span>
                     <select
                       value={testRole}
                       onChange={(e) => setTestRole(e.target.value as UserRole)}
                       className="w-full bg-[#18181B] border border-white/15 rounded px-2.5 py-2 text-white"
                     >
-                      <option value="PUBLIC_VISITOR">PUBLIC_VISITOR</option>
-                      <option value="REGISTERED_ADVENTURER">REGISTERED_ADVENTURER</option>
-                      <option value="PREMIUM_MEMBER_FUTURE">PREMIUM_MEMBER_FUTURE</option>
-                      <option value="VERIFIED_GUIDE">VERIFIED_GUIDE</option>
-                      <option value="ORGANIZATION_ADMIN">ORGANIZATION_ADMIN</option>
-                      <option value="DESTINATION_PARTNER">DESTINATION_PARTNER</option>
-                      <option value="SPONSOR_ACCOUNT">SPONSOR_ACCOUNT</option>
-                      <option value="DESTINATION_RESEARCHER">DESTINATION_RESEARCHER</option>
-                      <option value="VERIFICATION_OFFICER">VERIFICATION_OFFICER</option>
-                      <option value="SENIOR_VERIFICATION_LEAD">SENIOR_VERIFICATION_LEAD</option>
-                      <option value="APPEAL_OFFICER">APPEAL_OFFICER</option>
-                      <option value="SECURITY_COMPLIANCE_OFFICER">SECURITY_COMPLIANCE_OFFICER</option>
-                      <option value="PLATFORM_SYSADMIN">PLATFORM_SYSADMIN</option>
-                      <option value="GOVERNANCE_COMMITTEE">GOVERNANCE_COMMITTEE</option>
-                      <option value="FOUNDER">FOUNDER</option>
+                      {ALL_USER_ROLES.map((r) => (
+                        <option key={r} value={r}>
+                          {r}
+                        </option>
+                      ))}
                     </select>
                   </label>
 
                   <label className="space-y-1 block">
-                    <span className="text-[#A1A1AA]">2. Select Resource</span>
+                    <span className="text-[#A1A1AA]">2. Select Resource (14)</span>
                     <select
                       value={testResource}
                       onChange={(e) => setTestResource(e.target.value as ResourceDomain)}
                       className="w-full bg-[#18181B] border border-white/15 rounded px-2.5 py-2 text-white"
                     >
-                      <option value="VERIFICATION_DECISIONS">VERIFICATION_DECISIONS</option>
-                      <option value="APPEAL_TRIBUNAL_DECISIONS">APPEAL_TRIBUNAL_DECISIONS</option>
-                      <option value="APPEND_ONLY_AUDIT_LOGS">APPEND_ONLY_AUDIT_LOGS</option>
-                      <option value="PRIVATE_EVIDENCE_VAULT">PRIVATE_EVIDENCE_VAULT</option>
-                      <option value="DRAFT_RESEARCH_DESTINATIONS_STAGES_1_4">
-                        DRAFT_DESTINATIONS_STAGES_1_4
-                      </option>
-                      <option value="BADGES_AND_CERTIFICATES">BADGES_AND_CERTIFICATES</option>
-                      <option value="PUBLIC_DESTINATIONS_STAGE_5">PUBLIC_DESTINATIONS_STAGE_5</option>
-                      <option value="VERIFIED_LEADERBOARDS">VERIFIED_LEADERBOARDS</option>
+                      {ALL_RESOURCE_DOMAINS.map((res) => (
+                        <option key={res} value={res}>
+                          {res}
+                        </option>
+                      ))}
                     </select>
                   </label>
 
                   <label className="space-y-1 block">
-                    <span className="text-[#A1A1AA]">3. Select Action Verb</span>
+                    <span className="text-[#A1A1AA]">3. Select Action Verb (8)</span>
                     <select
                       value={testVerb}
                       onChange={(e) => setTestVerb(e.target.value as ActionVerb)}
                       className="w-full bg-[#18181B] border border-white/15 rounded px-2.5 py-2 text-white"
                     >
-                      <option value="READ">READ</option>
-                      <option value="CREATE">CREATE</option>
-                      <option value="UPDATE">UPDATE</option>
-                      <option value="DELETE">DELETE</option>
-                      <option value="APPROVE">APPROVE</option>
-                      <option value="REJECT">REJECT</option>
-                      <option value="PUBLISH">PUBLISH</option>
-                      <option value="REVOKE">REVOKE</option>
+                      {ALL_ACTION_VERBS.map((v) => (
+                        <option key={v} value={v}>
+                          {v}
+                        </option>
+                      ))}
                     </select>
                   </label>
                 </div>
@@ -2527,22 +2683,72 @@ export default function App() {
               </div>
             </section>
 
-            {/* Append-Only WORM Audit Trail Explorer (Correction 2.3) */}
+            {/* Dual-Control (2P) Approvals Ledger (SEC-GOV-003) */}
+            <section className="bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-4">
+              <div className="border-b border-white/10 pb-3">
+                <p className="text-xs text-[#C9A86A] font-mono-tabular">
+                  SEC-GOV-003 · TWO-PERSON (2P) DUAL-CONTROL APPROVAL STATE MACHINE
+                </p>
+                <h2 className="font-display text-xl font-bold text-white mt-1">
+                  Dual-Control Governance & Revocation Ledger ({dualControlApprovals.length})
+                </h2>
+                <p className="text-xs text-[#A1A1AA] mt-0.5">
+                  Stage 4/5 destination publication and certificate revocations require two distinct authenticated principals (Initiator &ne; Co-Signer).
+                </p>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs max-h-60 overflow-y-auto pr-1">
+                {dualControlApprovals.map((app) => (
+                  <div
+                    key={app.approvalId}
+                    className="p-3.5 rounded-xl bg-[#18181B] border border-white/10 space-y-1"
+                  >
+                    <div className="flex items-center justify-between font-mono-tabular">
+                      <span className="text-[#FFD700] font-semibold">
+                        {app.operationType} · {app.targetEntityId}
+                      </span>
+                      <span
+                        className={
+                          app.status === 'EXECUTED'
+                            ? 'text-emerald-400'
+                            : 'text-amber-400'
+                        }
+                      >
+                        {app.status}
+                      </span>
+                    </div>
+                    <p className="text-neutral-300">{app.reason}</p>
+                    <p className="text-[11px] font-mono-tabular text-[#A1A1AA]">
+                      Principal 1: {app.initiatorUserId} ({app.initiatorRole}) · Principal 2:{' '}
+                      {app.cosignerUserId
+                        ? `${app.cosignerUserId} (${app.cosignerRole})`
+                        : 'AWAITING_SECOND_PRINCIPAL'}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            {/* Append-Only SQLite Trigger-Protected Audit Trail Explorer (SEC-DB-001 & SEC-CRYPTO-002) */}
             <section className="bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/10 pb-4">
                 <div>
                   <p className="text-xs text-[#C9A86A] font-mono-tabular">
-                    CORRECTION 2.3 · WRITE-ONCE-READ-MANY (WORM) APPEND-ONLY AUDIT LEDGER
+                    SEC-DB-001 & SEC-CRYPTO-002 · APPEND-ONLY SQLITE TRIGGER-IMMUTABLE AUDIT LEDGER
                   </p>
                   <h2 className="font-display text-xl font-bold text-white mt-1">
-                    Tamper-Resistant Governance & Verification Audit Log
+                    Tamper-Evident Governance & Verification Audit Log
                   </h2>
                   <p className="text-xs text-[#A1A1AA] mt-0.5">
-                    Application service account holds INSERT-only privileges (zero UPDATE/DELETE/TRUNCATE) + sequential HMAC chaining + out-of-band WORM replication.
+                    Protected by SQLite BEFORE UPDATE / BEFORE DELETE triggers + RFC 4231 HMAC-SHA256 sequential hash chaining. Honest WORM reporting: local trigger-immutable until external cloud WORM sink is configured.
                   </p>
                 </div>
-                <span className="text-xs font-mono-tabular text-emerald-400">
-                  Chain Integrity: {auditEvents.length} Sequential Events Verified
+                <span
+                  className={`text-xs font-mono-tabular ${
+                    auditIntegrityValid ? 'text-emerald-400' : 'text-red-400'
+                  }`}
+                >
+                  HMAC-SHA256 Chain Integrity: {auditEvents.length} Events (
+                  {auditIntegrityValid ? 'VERIFIED' : 'TAMPER_DETECTED'})
                 </span>
               </div>
 
@@ -2557,7 +2763,9 @@ export default function App() {
                         #{evt.sequenceNumber} · {evt.eventId} · {evt.actionType}
                       </span>
                       <span className="text-[#A1A1AA]">
-                        {evt.timestampUtc} · Role: {evt.actorRole} · WORM: {evt.wormReplicated ? 'LOCKED' : 'PENDING'}
+                        {evt.timestampUtc} · Role: {evt.actorRole} · Mode:{' '}
+                        {evt.storageMode || 'LOCAL_SQLITE_TRIGGER_IMMUTABLE'} (External WORM:{' '}
+                        {evt.wormReplicated ? 'TRUE' : 'FALSE'})
                       </span>
                     </div>
                     <p className="text-white">{evt.summary}</p>
@@ -2573,7 +2781,7 @@ export default function App() {
             <section className="bg-[#121214] border border-white/10 rounded-2xl p-6 space-y-5">
               <div className="border-b border-white/10 pb-4">
                 <p className="text-xs text-[#C9A86A] font-mono-tabular">
-                  MASTER ROADMAP · EXACTLY 21 MAIN PHASES PRESERVED
+                  MASTER ROADMAP · EXACTLY 21 MAIN PHASES WITH EVIDENCE-BASED STATUSES
                 </p>
                 <h2 className="font-display text-xl font-bold text-white mt-1">
                   0 TO 8848 — 21-Phase Master Implementation & Governance Roadmap
@@ -2591,10 +2799,12 @@ export default function App() {
                         <span className="text-[#FFD700] font-bold">{ph.code}</span>
                         <span
                           className={
-                            ph.status === 'APPROVED_BASELINE'
+                            ph.status === 'TESTED' || ph.status === 'DOCUMENTED'
                               ? 'text-emerald-400'
                               : ph.status === 'HARD_LOCKED_GATE'
                               ? 'text-red-400'
+                              : ph.status === 'NOT_STARTED'
+                              ? 'text-[#A1A1AA]'
                               : 'text-[#C9A86A]'
                           }
                         >
@@ -2625,25 +2835,21 @@ export default function App() {
       </main>
 
       {/* =====================================================================
-          CLEAN INSTITUTIONAL FOOTER (No Fake Telemetry Tickers)
+          INSTITUTIONAL FOOTER
       ===================================================================== */}
       <footer className="bg-[#0A0A0A] border-t border-white/10 px-6 py-8 mt-12 text-xs text-[#A1A1AA]">
         <div className="max-w-[1400px] mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <div className="space-y-1">
-            <p className="font-display text-sm font-bold text-white">
-              0 TO 8848 — Global Adventure Achievement Platform
+            <p className="font-display font-bold text-white tracking-wider">
+              0 TO 8848 — GLOBAL ADVENTURE ACHIEVEMENT PLATFORM
             </p>
             <p>
-              EXPLORE. ACHIEVE. PROVE. · BUILT IN NEPAL. MADE FOR THE WORLD. · https://0to8848official.com
+              Official Domain: https://0to8848official.com · Built in Nepal. Made for the World.
             </p>
           </div>
-          <div className="text-left sm:text-right space-y-1">
-            <p className="text-[#C9A86A] font-medium">
-              TRUST FIRST. SUSTAINABLE REVENUE SECOND. ACHIEVEMENTS MUST BE EARNED, NEVER BOUGHT.
-            </p>
-            <p>
-              Standard Digital Badges & Approved Certificates are Permanently Free · Independent Human Verification Department
-            </p>
+          <div className="font-mono-tabular text-right space-y-1">
+            <p className="text-[#C9A86A]">EXPLORE. ACHIEVE. PROVE.</p>
+            <p>100 Global Destinations · 21 Master Phases · Earned, Never Bought</p>
           </div>
         </div>
       </footer>
