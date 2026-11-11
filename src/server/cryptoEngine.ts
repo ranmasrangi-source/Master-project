@@ -1,40 +1,85 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { AppendOnlyAuditEvent } from '../types/platform';
 
 const CROCKFORD_BASE32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 
 /**
- * SEC-CRYPTO-001 Remediation:
+ * SEC-CRYPTO-001 & BUG-P1-005 Remediation:
  * Keyed configuration with key versioning & rotation support.
+ * Never hardcodes static keys in source code. In production, requires AUDIT_HMAC_SECRET_HEX
+ * to be injected from the environment; in non-production, generates an ephemeral 256-bit
+ * CSPRNG key in OS temp storage if AUDIT_HMAC_SECRET_HEX is not set.
  */
 interface CryptoKeyRing {
   activeVersion: string;
   keys: Record<string, Buffer>;
 }
 
-const DEFAULT_DEV_HMAC_KEY_HEX =
-  '8848f00d9a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef01234567';
+export function initializeProcessHmacKey(
+  envOverride?: Record<string, string | undefined>
+): Buffer {
+  const env = envOverride ?? process.env;
+  const envHex = env.AUDIT_HMAC_SECRET_HEX?.trim();
+  if (envHex) {
+    const buf = Buffer.from(envHex, 'hex');
+    if (buf.length < 32) {
+      throw new Error(
+        'CRYPTO_KEY_TOO_SHORT: AUDIT_HMAC_SECRET_HEX must be at least 256 bits (64 hex chars).'
+      );
+    }
+    return buf;
+  }
+  if (env.NODE_ENV === 'production') {
+    throw new Error(
+      'CRYPTO_KEY_MISSING_IN_PRODUCTION: AUDIT_HMAC_SECRET_HEX environment variable is mandatory in production.'
+    );
+  }
+  // Ephemeral 256-bit CSPRNG key for non-production / test runs (zero hardcoded key material)
+  const tmpKeyPath = path.join(os.tmpdir(), '0to8848_ephemeral_hmac_v2.key');
+  try {
+    if (fs.existsSync(tmpKeyPath)) {
+      const existingHex = fs.readFileSync(tmpKeyPath, 'utf-8').trim();
+      const existingBuf = Buffer.from(existingHex, 'hex');
+      if (existingBuf.length >= 32) {
+        return existingBuf;
+      }
+    }
+    const generated = crypto.randomBytes(32);
+    fs.writeFileSync(tmpKeyPath, generated.toString('hex'), { mode: 0o600 });
+    return generated;
+  } catch {
+    return crypto.randomBytes(32);
+  }
+}
 
-let keyRing: CryptoKeyRing = {
-  activeVersion: process.env.AUDIT_KEY_VERSION || 'v1',
-  keys: {
-    v1: Buffer.from(
-      process.env.AUDIT_HMAC_SECRET_HEX || DEFAULT_DEV_HMAC_KEY_HEX,
-      'hex'
-    ),
-  },
-};
+let keyRingInstance: CryptoKeyRing | null = null;
+
+function getKeyRing(): CryptoKeyRing {
+  if (!keyRingInstance) {
+    keyRingInstance = {
+      activeVersion: process.env.AUDIT_KEY_VERSION || 'v1',
+      keys: {
+        v1: initializeProcessHmacKey(),
+      },
+    };
+  }
+  return keyRingInstance;
+}
 
 export function configureKeyRing(newVersion: string, newKeyBytes: Buffer): void {
   if (newKeyBytes.length < 32) {
     throw new Error('Cryptographic HMAC key must be at least 256 bits (32 bytes).');
   }
-  keyRing.keys[newVersion] = Buffer.from(newKeyBytes);
-  keyRing.activeVersion = newVersion;
+  const ring = getKeyRing();
+  ring.keys[newVersion] = Buffer.from(newKeyBytes);
+  ring.activeVersion = newVersion;
 }
 
 export function getActiveKeyVersion(): string {
-  return keyRing.activeVersion;
+  return getKeyRing().activeVersion;
 }
 
 /**
@@ -103,10 +148,11 @@ export function computeHmacSha256Hex(
   secretKey?: Buffer | string,
   keyVersion?: string
 ): string {
+  const ring = getKeyRing();
   const resolvedKey =
     secretKey !== undefined
       ? secretKey
-      : keyRing.keys[keyVersion || keyRing.activeVersion] || keyRing.keys.v1;
+      : ring.keys[keyVersion || ring.activeVersion] || ring.keys.v1;
   return crypto.createHmac('sha256', resolvedKey).update(data).digest('hex');
 }
 
@@ -173,7 +219,7 @@ export function computeAuditEventHmac(
   },
   keyVersion?: string
 ): { hmac: string; keyVersion: string } {
-  const version = keyVersion || keyRing.activeVersion;
+  const version = keyVersion || getKeyRing().activeVersion;
   const payload = formatAuditEventCanonicalPayload(params);
   const hmac = computeHmacSha256Hex(payload, undefined, version);
   return { hmac, keyVersion: version };

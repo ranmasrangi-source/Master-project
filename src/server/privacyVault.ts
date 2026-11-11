@@ -153,9 +153,8 @@ export function maskResidentialTrackpoints(
       points[i].lon
     );
 
-    const isStartTail = i < apexIndex && distFromStart < maskRadiusMeters && i === 0;
-    const isEndTail =
-      i > apexIndex && distFromEnd < maskRadiusMeters && i === points.length - 1;
+    const isStartTail = i < apexIndex && distFromStart < maskRadiusMeters;
+    const isEndTail = i > apexIndex && distFromEnd < maskRadiusMeters;
 
     if (isStartTail || isEndTail) {
       removedCount++;

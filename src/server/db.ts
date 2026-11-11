@@ -1,8 +1,10 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { DESTINATIONS_100_CATALOG } from '../data/destinations100';
 import {
+  evaluateRbacPermission,
   INITIAL_SUBMISSIONS_QUEUE,
   INITIAL_VERIFIED_CERTIFICATES,
 } from '../data/governanceAndPhases';
@@ -24,8 +26,9 @@ import {
   UserRole,
 } from '../types/platform';
 import {
+  extractSaltHexFromStoredHash,
+  generateRandomMfaSecretHex,
   generateSessionTokenPair,
-  generateTotpCode,
   hashPasswordScrypt,
   hashSessionToken,
   roleRequiresMfa,
@@ -37,6 +40,7 @@ import {
   computeHmacSha256Hex,
   computeSha256Hex,
   generateNonEnumerableVerificationId,
+  verifyAuditChainIntegrity,
 } from './cryptoEngine';
 import {
   decryptPiiWithUserDek,
@@ -49,23 +53,41 @@ import {
 let dbInstance: DatabaseSync | null = null;
 let currentDbPath: string = '';
 
-export const TEST_ACCOUNTS_CREDENTIAL_INFO: Record<
-  string,
-  {
-    userId: string;
-    username: string;
-    defaultPassword: string;
-    mfaSecretHex: string;
-    role: UserRole;
-    officerCode: string;
-    displayName: string;
+/**
+ * BUG-P0-001 Remediation:
+ * Demo/test account provisioning is strictly prohibited in production (NODE_ENV === 'production').
+ * Even if an environment flag is set accidentally, production unconditionally disables demo provisioning.
+ */
+export function isDemoProvisioningAllowed(): boolean {
+  if (process.env.NODE_ENV === 'production') {
+    return false;
   }
+  return (
+    process.env.NODE_ENV === 'test' ||
+    Boolean(process.env.VITEST) ||
+    process.env.ENABLE_DEV_DEMO_PROVISIONING !== 'false'
+  );
+}
+
+export interface NonSensitiveAccountDirectoryProfile {
+  userId: string;
+  username: string;
+  role: UserRole;
+  officerCode: string;
+  displayName: string;
+}
+
+/**
+ * Non-sensitive identity templates for non-production test/dev seeding.
+ * Contains ZERO hardcoded passwords, password hints, or MFA secrets.
+ */
+export const NON_SENSITIVE_ACCOUNT_PROFILES: Record<
+  string,
+  NonSensitiveAccountDirectoryProfile
 > = {
   'usr-tenzing-nepal': {
     userId: 'usr-tenzing-nepal',
     username: 'tenzing.adventurer',
-    defaultPassword: 'Adventurer#8848!Nepal',
-    mfaSecretHex: '3132333435363738393031323334353637383930',
     role: 'REGISTERED_ADVENTURER',
     officerCode: 'ADV-NP-001',
     displayName: 'Mingma Dorjee Sherpa (Adventurer)',
@@ -73,8 +95,6 @@ export const TEST_ACCOUNTS_CREDENTIAL_INFO: Record<
   'usr-lukas-at': {
     userId: 'usr-lukas-at',
     username: 'lukas.adventurer',
-    defaultPassword: 'Adventurer#8848!Alps',
-    mfaSecretHex: '3132333435363738393031323334353637383931',
     role: 'REGISTERED_ADVENTURER',
     officerCode: 'ADV-AT-003',
     displayName: 'Lukas Hofer (Adventurer)',
@@ -82,8 +102,6 @@ export const TEST_ACCOUNTS_CREDENTIAL_INFO: Record<
   'usr-reviewer-219': {
     userId: 'usr-reviewer-219',
     username: 'pemba.verifier',
-    defaultPassword: 'Verifier#8848!Dept219',
-    mfaSecretHex: '4142434445464748495041424344454647484950',
     role: 'VERIFICATION_OFFICER',
     officerCode: 'REV-OFFICER-219',
     displayName: 'Dr. Pemba Sherpa (Independent Verification Officer)',
@@ -91,8 +109,6 @@ export const TEST_ACCOUNTS_CREDENTIAL_INFO: Record<
   'usr-reviewer-104': {
     userId: 'usr-reviewer-104',
     username: 'kilian.verifier',
-    defaultPassword: 'Verifier#8848!Dept104',
-    mfaSecretHex: '4142434445464748495041424344454647484951',
     role: 'VERIFICATION_OFFICER',
     officerCode: 'REV-OFFICER-104',
     displayName: 'Kilian Vance (Verification Officer — Reviewed Sub 101 & 103)',
@@ -100,8 +116,6 @@ export const TEST_ACCOUNTS_CREDENTIAL_INFO: Record<
   'usr-senior-lead-301': {
     userId: 'usr-senior-lead-301',
     username: 'ang.seniorlead',
-    defaultPassword: 'SeniorLead#8848!Dept301',
-    mfaSecretHex: '4142434445464748495041424344454647484952',
     role: 'SENIOR_VERIFICATION_LEAD',
     officerCode: 'REV-LEAD-301',
     displayName: 'Ang Phurba Sherpa (Senior Verification Lead)',
@@ -109,8 +123,6 @@ export const TEST_ACCOUNTS_CREDENTIAL_INFO: Record<
   'usr-guide-conflict-demo': {
     userId: 'usr-guide-conflict-demo',
     username: 'dawa.conflicted',
-    defaultPassword: 'Verifier#8848!Guide399',
-    mfaSecretHex: '4142434445464748495041424344454647484953',
     role: 'VERIFICATION_OFFICER',
     officerCode: 'REV-OFFICER-399',
     displayName: 'Dawa Geljen (Reviewer with Guide/Roster COI on Sub 101)',
@@ -118,8 +130,6 @@ export const TEST_ACCOUNTS_CREDENTIAL_INFO: Record<
   'usr-appeal-401': {
     userId: 'usr-appeal-401',
     username: 'ananya.appeal',
-    defaultPassword: 'Appeal#8848!Tribunal401',
-    mfaSecretHex: '5152535455565758596051525354555657585960',
     role: 'APPEAL_OFFICER',
     officerCode: 'APL-TRIBUNAL-401',
     displayName: 'Justice Ananya Adhikari (Independent Appeal Officer)',
@@ -127,8 +137,6 @@ export const TEST_ACCOUNTS_CREDENTIAL_INFO: Record<
   'usr-gov-founder-001': {
     userId: 'usr-gov-founder-001',
     username: 'founder.governance',
-    defaultPassword: 'Founder#8848!Gov001',
-    mfaSecretHex: '6162636465666768697061626364656667686970',
     role: 'FOUNDER',
     officerCode: 'GOV-FOUNDER-001',
     displayName: 'Platform Founder (Dual-Control Principal 1)',
@@ -136,8 +144,6 @@ export const TEST_ACCOUNTS_CREDENTIAL_INFO: Record<
   'usr-gov-committee-002': {
     userId: 'usr-gov-committee-002',
     username: 'chair.governance',
-    defaultPassword: 'Committee#8848!Gov002',
-    mfaSecretHex: '6162636465666768697061626364656667686971',
     role: 'GOVERNANCE_COMMITTEE',
     officerCode: 'GOV-COMMITTEE-002',
     displayName: 'Governance Committee Chair (Dual-Control Principal 2)',
@@ -145,8 +151,6 @@ export const TEST_ACCOUNTS_CREDENTIAL_INFO: Record<
   'usr-researcher-501': {
     userId: 'usr-researcher-501',
     username: 'suman.researcher',
-    defaultPassword: 'Researcher#8848!Carto501',
-    mfaSecretHex: '7172737475767778798071727374757677787980',
     role: 'DESTINATION_RESEARCHER',
     officerCode: 'RES-CARTO-501',
     displayName: 'Suman Thapa (Destination Geodetic Researcher)',
@@ -154,13 +158,46 @@ export const TEST_ACCOUNTS_CREDENTIAL_INFO: Record<
   'usr-sponsor-701': {
     userId: 'usr-sponsor-701',
     username: 'brand.sponsor',
-    defaultPassword: 'Sponsor#8848!Commercial',
-    mfaSecretHex: '7172737475767778798071727374757677787981',
     role: 'SPONSOR_ACCOUNT',
     officerCode: 'SPN-BRAND-701',
     displayName: 'Alpine Gear Sponsor Account (Commercial Firewall Restricted)',
   },
+  'usr-security-601': {
+    userId: 'usr-security-601',
+    username: 'compliance.officer',
+    role: 'SECURITY_COMPLIANCE_OFFICER',
+    officerCode: 'SEC-COMP-601',
+    displayName: 'Nima Tamang (Security & Compliance Officer)',
+  },
 };
+
+interface EphemeralTestCredentialEntry extends NonSensitiveAccountDirectoryProfile {
+  ephemeralPassword: string;
+  mfaSecretHex: string;
+}
+
+const ephemeralTestCredentialsMap = new Map<string, EphemeralTestCredentialEntry>();
+
+/**
+ * Strictly non-production helper for automated Vitest suites to retrieve
+ * CSPRNG-generated ephemeral credentials for seeded test accounts.
+ * Throws immediately if called in production. Never exposed via any HTTP API.
+ */
+export function getTestOnlyAccountCredentials(
+  userId: string
+): EphemeralTestCredentialEntry {
+  if (!isDemoProvisioningAllowed()) {
+    throw new Error(
+      'PRODUCTION_CREDENTIAL_ACCESS_FORBIDDEN: Demo/test credential provisioning is disabled in production.'
+    );
+  }
+  getDb(); // Ensure DB and ephemeral credentials are initialized
+  const entry = ephemeralTestCredentialsMap.get(userId);
+  if (!entry) {
+    throw new Error(`TEST_ACCOUNT_NOT_FOUND: ${userId}`);
+  }
+  return entry;
+}
 
 export function getDb(customPath?: string): DatabaseSync {
   const targetPath =
@@ -395,11 +432,97 @@ function initializeSchemaAndSeed(db: DatabaseSync): void {
     END;
   `);
 
-  const checkMigration = db
+  const checkMigration001 = db
     .prepare('SELECT version FROM schema_migrations WHERE version = ?')
     .get('001_FOUNDATION_RECOVERY');
 
-  if (checkMigration) {
+  const checkMigration002 = db
+    .prepare('SELECT version FROM schema_migrations WHERE version = ?')
+    .get('002_P0_P1_SECURITY_ROTATION');
+
+  if (checkMigration001 && checkMigration002) {
+    return;
+  }
+
+  // If 001 was already applied on an existing SQLite file, execute 002 security rotation
+  if (checkMigration001 && !checkMigration002) {
+    runInTransaction(db, () => {
+      const nowUtc = new Date().toISOString();
+      const existingUsers = db
+        .prepare('SELECT user_id, username, role, officer_code, display_label FROM users')
+        .all() as Record<string, unknown>[];
+
+      const updateCredsStmt = db.prepare(`
+        UPDATE users
+        SET password_hash = ?, mfa_secret_hex = ?, mfa_enabled = ?
+        WHERE user_id = ?
+      `);
+
+      for (const u of existingUsers) {
+        const uid = String(u.user_id);
+        const role = String(u.role) as UserRole;
+        const rotatedPassword = `Rot#${crypto.randomBytes(16).toString('base64url')}!8848`;
+        const rotatedHash = hashPasswordScrypt(rotatedPassword);
+        const rotatedMfaHex = generateRandomMfaSecretHex();
+        const mfaEnabled = roleRequiresMfa(role) ? 1 : 0;
+
+        updateCredsStmt.run(rotatedHash, rotatedMfaHex, mfaEnabled, uid);
+
+        if (isDemoProvisioningAllowed()) {
+          ephemeralTestCredentialsMap.set(uid, {
+            userId: uid,
+            username: String(u.username),
+            role,
+            officerCode: String(u.officer_code),
+            displayName: String(u.display_label),
+            ephemeralPassword: rotatedPassword,
+            mfaSecretHex: rotatedMfaHex,
+          });
+        }
+      }
+
+      // Ensure usr-security-601 exists if migrating from 001
+      const hasSecOfficer = db
+        .prepare('SELECT 1 FROM users WHERE user_id = ?')
+        .get('usr-security-601');
+      if (!hasSecOfficer && isDemoProvisioningAllowed()) {
+        const secProfile = NON_SENSITIVE_ACCOUNT_PROFILES['usr-security-601'];
+        const secPassword = `Rot#${crypto.randomBytes(16).toString('base64url')}!8848`;
+        const secHash = hashPasswordScrypt(secPassword);
+        const secMfa = generateRandomMfaSecretHex();
+        db.prepare(`
+          INSERT INTO users (
+            user_id, internal_actor_uuid, username, password_hash, role, officer_code,
+            display_label, organization_id, expedition_roster_group_code,
+            guide_for_user_ids_json, mfa_secret_hex, mfa_enabled, is_erased, created_at_utc
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, '[]', ?, 1, 0, ?)
+        `).run(
+          secProfile.userId,
+          'act-uuid-sec-601',
+          secProfile.username,
+          secHash,
+          secProfile.role,
+          secProfile.officerCode,
+          secProfile.displayName,
+          secMfa,
+          nowUtc
+        );
+        ephemeralTestCredentialsMap.set(secProfile.userId, {
+          ...secProfile,
+          ephemeralPassword: secPassword,
+          mfaSecretHex: secMfa,
+        });
+      }
+
+      // Revoke all pre-rotation sessions
+      db.prepare(
+        'UPDATE user_sessions SET revoked_at_utc = ? WHERE revoked_at_utc IS NULL'
+      ).run(nowUtc);
+
+      db.prepare(
+        'INSERT INTO schema_migrations (version, applied_at_utc) VALUES (?, ?)'
+      ).run('002_P0_P1_SECURITY_ROTATION', nowUtc);
+    });
     return;
   }
 
@@ -407,6 +530,7 @@ function initializeSchemaAndSeed(db: DatabaseSync): void {
     const nowUtc = '2026-11-11T00:00:00Z';
 
     // 1. Seed Users, Encryption Keys & AES-256-GCM PII Vault
+    // Every account receives a unique 128-bit CSPRNG password salt and a unique 160-bit CSPRNG MFA secret.
     const additionalCertificateHolders = [
       {
         userId: 'usr-pasangnya-01',
@@ -483,16 +607,15 @@ function initializeSchemaAndSeed(db: DatabaseSync): void {
       ) VALUES (?, ?, ?, ?, ?)
     `);
 
-    for (const acc of Object.values(TEST_ACCOUNTS_CREDENTIAL_INFO)) {
+    for (const acc of Object.values(NON_SENSITIVE_ACCOUNT_PROFILES)) {
       const demoProfile = Object.values(DEMO_ACTOR_PROFILES).find(
         (p) => p.userId === acc.userId
       );
       const internalUuid =
         demoProfile?.internalActorUuid || `act-uuid-${acc.userId}`;
-      const pwdHash = hashPasswordScrypt(
-        acc.defaultPassword,
-        '00112233445566778899aabbccddeeff'
-      );
+      const generatedPassword = `Eph#${crypto.randomBytes(16).toString('base64url')}!8848`;
+      const pwdHash = hashPasswordScrypt(generatedPassword);
+      const uniqueMfaSecretHex = generateRandomMfaSecretHex();
       const mfaEnabled = roleRequiresMfa(acc.role) ? 1 : 0;
 
       insertUserStmt.run(
@@ -506,10 +629,18 @@ function initializeSchemaAndSeed(db: DatabaseSync): void {
         demoProfile?.organizationId || null,
         demoProfile?.expeditionRosterGroupCode || null,
         JSON.stringify(demoProfile?.isGuideForUserIds || []),
-        acc.mfaSecretHex,
+        uniqueMfaSecretHex,
         mfaEnabled,
         nowUtc
       );
+
+      if (isDemoProvisioningAllowed()) {
+        ephemeralTestCredentialsMap.set(acc.userId, {
+          ...acc,
+          ephemeralPassword: generatedPassword,
+          mfaSecretHex: uniqueMfaSecretHex,
+        });
+      }
 
       const dekHex = generateUserDekHex();
       insertKeyStmt.run(acc.userId, dekHex, nowUtc);
@@ -525,10 +656,9 @@ function initializeSchemaAndSeed(db: DatabaseSync): void {
     }
 
     for (const holder of additionalCertificateHolders) {
-      const pwdHash = hashPasswordScrypt(
-        'Adventurer#8848!Pass',
-        'ffeeddccbbaa99887766554433221100'
-      );
+      const generatedHolderPass = `Eph#${crypto.randomBytes(16).toString('base64url')}!8848`;
+      const pwdHash = hashPasswordScrypt(generatedHolderPass);
+      const uniqueHolderMfaHex = generateRandomMfaSecretHex();
       insertUserStmt.run(
         holder.userId,
         holder.internalUuid,
@@ -540,10 +670,21 @@ function initializeSchemaAndSeed(db: DatabaseSync): void {
         null,
         null,
         '[]',
-        '3132333435363738393031323334353637383939',
+        uniqueHolderMfaHex,
         0,
         nowUtc
       );
+      if (isDemoProvisioningAllowed()) {
+        ephemeralTestCredentialsMap.set(holder.userId, {
+          userId: holder.userId,
+          username: holder.username,
+          role: holder.role,
+          officerCode: holder.officerCode,
+          displayName: holder.fullName,
+          ephemeralPassword: generatedHolderPass,
+          mfaSecretHex: uniqueHolderMfaHex,
+        });
+      }
       const dekHex = generateUserDekHex();
       insertKeyStmt.run(holder.userId, dekHex, nowUtc);
       insertPiiStmt.run(
@@ -808,6 +949,9 @@ function initializeSchemaAndSeed(db: DatabaseSync): void {
     db.prepare(
       'INSERT INTO schema_migrations (version, applied_at_utc) VALUES (?, ?)'
     ).run('001_FOUNDATION_RECOVERY', nowUtc);
+    db.prepare(
+      'INSERT INTO schema_migrations (version, applied_at_utc) VALUES (?, ?)'
+    ).run('002_P0_P1_SECURITY_ROTATION', nowUtc);
   });
 }
 
@@ -1194,13 +1338,362 @@ export function revokeSessionToken(rawSessionToken: string): boolean {
 }
 
 /**
- * Helper to generate a current valid TOTP code for a known demo/test userId
- * so automated tests and the interactive security workstation can sign in with real MFA.
+ * BUG-P0-002 Audit Helper:
+ * Returns stored password salt metadata and MFA secret uniqueness stats for automated security tests
+ * without exposing raw secrets in production.
  */
-export function getTotpCodeForUser(userId: string): string {
-  const info = TEST_ACCOUNTS_CREDENTIAL_INFO[userId];
-  if (!info) return '000000';
-  return generateTotpCode(info.mfaSecretHex);
+export function getDatabaseCredentialSecurityStats(): {
+  totalUsers: number;
+  uniquePasswordSalts: number;
+  uniqueMfaSecrets: number;
+  allHashesUseScryptFormat: boolean;
+} {
+  const db = getDb();
+  const rows = db
+    .prepare('SELECT password_hash, mfa_secret_hex FROM users')
+    .all() as { password_hash: string; mfa_secret_hex: string }[];
+
+  const salts = new Set<string>();
+  const mfaSecrets = new Set<string>();
+  let allHashesUseScryptFormat = true;
+
+  for (const r of rows) {
+    if (!r.password_hash.startsWith('scrypt$16384$8$1$')) {
+      allHashesUseScryptFormat = false;
+    }
+    const saltHex = extractSaltHexFromStoredHash(r.password_hash);
+    if (saltHex && saltHex.length >= 32) {
+      salts.add(saltHex);
+    }
+    if (r.mfa_secret_hex && r.mfa_secret_hex.length >= 40) {
+      mfaSecrets.add(r.mfa_secret_hex);
+    }
+  }
+
+  return {
+    totalUsers: rows.length,
+    uniquePasswordSalts: salts.size,
+    uniqueMfaSecrets: mfaSecrets.size,
+    allHashesUseScryptFormat,
+  };
+}
+
+/**
+ * BUG-P0-003 Remediation:
+ * Sanitizes a certificate record for public / non-owner consumption so internal
+ * holderUserId, holderInternalActorUuid, and submissionId are never leaked.
+ */
+export function sanitizeCertificateForViewer(
+  cert: PublicCertificateRecord,
+  viewer: AuthenticatedSessionUser | null
+): Partial<PublicCertificateRecord> & { verificationId: string } {
+  const isOwnerOrGovernance =
+    viewer !== null &&
+    (viewer.userId === cert.holderUserId ||
+      ['FOUNDER', 'GOVERNANCE_COMMITTEE', 'SECURITY_COMPLIANCE_OFFICER'].includes(
+        viewer.role
+      ));
+
+  return {
+    verificationId: cert.verificationId,
+    holderPublicDisplay: cert.holderPublicDisplay,
+    holderPrivacyMode: cert.holderPrivacyMode,
+    holderDatePrecision: cert.holderDatePrecision,
+    holderNationality: cert.holderNationality,
+    destinationId: cert.destinationId,
+    destinationCode: cert.destinationCode,
+    destinationNameEn: cert.destinationNameEn,
+    destinationNameNe: cert.destinationNameNe,
+    verifiedElevationM: cert.verifiedElevationM,
+    verifiedElevationFt: cert.verifiedElevationFt,
+    elevationSourceCitation: cert.elevationSourceCitation,
+    routeName: cert.routeName,
+    verificationTrack: cert.verificationTrack,
+    publicCompletionDateDisplay: cert.publicCompletionDateDisplay,
+    issuedAtUtc: cert.issuedAtUtc,
+    status: cert.status,
+    revocationOrCorrectionNote: cert.revocationOrCorrectionNote,
+    reviewingOfficersCodes: cert.reviewingOfficersCodes,
+    badgeCode: cert.badgeCode,
+    certificateIntegrityDigest: cert.certificateIntegrityDigest,
+    optInPublicLeaderboards: cert.optInPublicLeaderboards,
+    ...(isOwnerOrGovernance ? { holderUserId: cert.holderUserId } : {}),
+  };
+}
+
+/**
+ * Strips raw vaultStorageKey and internal actor UUIDs from a submission before returning via API.
+ */
+export function sanitizeSubmissionForViewer(
+  sub: AchievementSubmission,
+  viewer: AuthenticatedSessionUser
+): AchievementSubmission {
+  const sanitizedArtifacts: EvidenceArtifact[] = sub.evidenceArtifacts.map(
+    (art) => {
+      const { vaultStorageKey: _omittedVaultKey, ...safeArt } = art;
+      return safeArt;
+    }
+  );
+
+  // Blind Reviewer Projection for VERIFICATION_OFFICER and SENIOR_VERIFICATION_LEAD
+  if (
+    viewer.role === 'VERIFICATION_OFFICER' ||
+    viewer.role === 'SENIOR_VERIFICATION_LEAD'
+  ) {
+    return {
+      ...sub,
+      applicantInternalActorUuid: undefined,
+      applicantDisplayName: `Blind Dossier [${sub.applicantInitials}]`,
+      evidenceArtifacts: sanitizedArtifacts,
+      appealRecord: undefined,
+    };
+  }
+
+  // Independent Appeal Review Team Projection
+  if (viewer.role === 'APPEAL_OFFICER') {
+    return {
+      ...sub,
+      applicantInternalActorUuid: undefined,
+      applicantDisplayName: `Blind Appeal Dossier [${sub.applicantInitials}]`,
+      evidenceArtifacts: sanitizedArtifacts,
+    };
+  }
+
+  // Adventurer / Owner or Governance Projection
+  return {
+    ...sub,
+    applicantInternalActorUuid: undefined,
+    evidenceArtifacts: sanitizedArtifacts,
+  };
+}
+
+export type BootstrapAccessTier =
+  | 'PUBLIC_INFORMATION'
+  | 'REGISTERED_ADVENTURER'
+  | 'VERIFICATION_OFFICER'
+  | 'APPEAL_REVIEW_TEAM'
+  | 'GOVERNANCE_COMMITTEE'
+  | 'FOUNDER'
+  | 'SPONSOR_ACCOUNT';
+
+/**
+ * BUG-P0-003 Remediation:
+ * Enforces authentication and role-based access tier scoping BEFORE querying
+ * sensitive tables (submissions, dual_control_approvals, audit_events).
+ * Separates access into 7 explicit tiers:
+ * 1. PUBLIC_INFORMATION (unauthenticated / PUBLIC_VISITOR)
+ * 2. REGISTERED_ADVENTURER (own submissions only, zero internal audit/dual-control)
+ * 3. VERIFICATION_OFFICER (blind verification queue, zero appeal/internal PII)
+ * 4. APPEAL_REVIEW_TEAM (disputed appeal queue only, original reviewer blocked)
+ * 5. GOVERNANCE_COMMITTEE (dual-control & audit oversight)
+ * 6. FOUNDER (constitutional & dual-control oversight)
+ * 7. SPONSOR_ACCOUNT (strict commercial firewall — zero submissions, audit, or dual-control)
+ */
+export function buildScopedBootstrapPayload(
+  sessionUser: AuthenticatedSessionUser | null
+): {
+  accessTier: BootstrapAccessTier;
+  sessionUser: AuthenticatedSessionUser | null;
+  destinations: DestinationRecord[];
+  submissions: AchievementSubmission[];
+  certificates: Array<Partial<PublicCertificateRecord> & { verificationId: string }>;
+  dualControlApprovals: DualControlApprovalRecord[];
+  auditEvents: AppendOnlyAuditEvent[];
+  auditChainStatus: { valid: boolean; checkedCount: number };
+} {
+  const destinations = listDestinations();
+  const rawCertificates = listCertificates();
+  const sanitizedCertificates = rawCertificates.map((c) =>
+    sanitizeCertificateForViewer(c, sessionUser)
+  );
+
+  // Verify audit chain integrity on server without exposing raw audit event records to unauthorized callers
+  const allAuditEventsInternal = listAuditEvents();
+  const chainCheck = verifyAuditChainIntegrity(allAuditEventsInternal);
+  const auditChainStatus = {
+    valid: chainCheck.valid,
+    checkedCount: chainCheck.checkedCount,
+  };
+
+  // Tier 1: Unauthenticated or PUBLIC_VISITOR -> Strictly Public Information Only
+  if (!sessionUser || sessionUser.role === 'PUBLIC_VISITOR') {
+    return {
+      accessTier: 'PUBLIC_INFORMATION',
+      sessionUser: null,
+      destinations,
+      submissions: [],
+      certificates: sanitizedCertificates,
+      dualControlApprovals: [],
+      auditEvents: [],
+      auditChainStatus,
+    };
+  }
+
+  // Tier 7: SPONSOR_ACCOUNT -> Strictly isolated by Commercial Sponsor Firewall
+  if (sessionUser.role === 'SPONSOR_ACCOUNT') {
+    return {
+      accessTier: 'SPONSOR_ACCOUNT',
+      sessionUser,
+      destinations,
+      submissions: [],
+      certificates: sanitizedCertificates,
+      dualControlApprovals: [],
+      auditEvents: [],
+      auditChainStatus,
+    };
+  }
+
+  // Tier 2: REGISTERED_ADVENTURER (and guide/partner/member accounts) -> Own submissions only
+  if (
+    [
+      'REGISTERED_ADVENTURER',
+      'PREMIUM_MEMBER_FUTURE',
+      'VERIFIED_GUIDE',
+      'ORGANIZATION_ADMIN',
+      'DESTINATION_PARTNER',
+    ].includes(sessionUser.role)
+  ) {
+    const db = getDb();
+    const ownRows = db
+      .prepare(
+        'SELECT record_json FROM submissions WHERE applicant_user_id = ? ORDER BY submitted_at_utc DESC'
+      )
+      .all(sessionUser.userId) as { record_json: string }[];
+    const ownSubmissions = ownRows
+      .map((r) => JSON.parse(r.record_json) as AchievementSubmission)
+      .map((s) => sanitizeSubmissionForViewer(s, sessionUser));
+
+    return {
+      accessTier: 'REGISTERED_ADVENTURER',
+      sessionUser,
+      destinations,
+      submissions: ownSubmissions,
+      certificates: sanitizedCertificates,
+      dualControlApprovals: [],
+      auditEvents: [],
+      auditChainStatus,
+    };
+  }
+
+  // Tier 3: VERIFICATION_OFFICER & SENIOR_VERIFICATION_LEAD -> Blind Verification Queue
+  if (
+    sessionUser.role === 'VERIFICATION_OFFICER' ||
+    sessionUser.role === 'SENIOR_VERIFICATION_LEAD'
+  ) {
+    const db = getDb();
+    const queueRows = db
+      .prepare(
+        "SELECT record_json FROM submissions WHERE status != 'APPEALED' ORDER BY submitted_at_utc DESC"
+      )
+      .all() as { record_json: string }[];
+    const blindQueue = queueRows
+      .map((r) => JSON.parse(r.record_json) as AchievementSubmission)
+      .map((s) => sanitizeSubmissionForViewer(s, sessionUser));
+
+    const canReadAudit = evaluateRbacPermission(
+      sessionUser.role,
+      'APPEND_ONLY_AUDIT_LOGS',
+      'READ'
+    ).allowed;
+
+    const dualControlForLead =
+      sessionUser.role === 'SENIOR_VERIFICATION_LEAD'
+        ? listDualControlApprovals().filter(
+            (d) => d.operationType === 'CERTIFICATE_REVOKE'
+          )
+        : [];
+
+    return {
+      accessTier: 'VERIFICATION_OFFICER',
+      sessionUser,
+      destinations,
+      submissions: blindQueue,
+      certificates: sanitizedCertificates,
+      dualControlApprovals: dualControlForLead,
+      auditEvents: canReadAudit ? allAuditEventsInternal : [],
+      auditChainStatus,
+    };
+  }
+
+  // Tier 4: APPEAL_OFFICER (Independent Appeal Review Team) -> Appealed Dossiers Only (COI Filtered)
+  if (sessionUser.role === 'APPEAL_OFFICER') {
+    const db = getDb();
+    const appealRows = db
+      .prepare(
+        "SELECT record_json FROM submissions WHERE status = 'APPEALED' ORDER BY submitted_at_utc DESC"
+      )
+      .all() as { record_json: string }[];
+    const appealQueue = appealRows
+      .map((r) => JSON.parse(r.record_json) as AchievementSubmission)
+      .filter(
+        (s) =>
+          !s.appealRecord?.originalReviewerUserIdsBlocked.includes(
+            sessionUser.userId
+          )
+      )
+      .map((s) => sanitizeSubmissionForViewer(s, sessionUser));
+
+    return {
+      accessTier: 'APPEAL_REVIEW_TEAM',
+      sessionUser,
+      destinations,
+      submissions: appealQueue,
+      certificates: sanitizedCertificates,
+      dualControlApprovals: [],
+      auditEvents: [],
+      auditChainStatus,
+    };
+  }
+
+  // Tier 5: GOVERNANCE_COMMITTEE (and Security/Compliance / Researcher / Sysadmin)
+  if (sessionUser.role !== 'FOUNDER') {
+    const canReadSubs = evaluateRbacPermission(
+      sessionUser.role,
+      'ACHIEVEMENT_SUBMISSIONS',
+      'READ'
+    ).allowed;
+    const canReadAudit = evaluateRbacPermission(
+      sessionUser.role,
+      'APPEND_ONLY_AUDIT_LOGS',
+      'READ'
+    ).allowed;
+    const canReadDualControl = [
+      'GOVERNANCE_COMMITTEE',
+      'SECURITY_COMPLIANCE_OFFICER',
+    ].includes(sessionUser.role);
+
+    const govSubmissions = canReadSubs
+      ? listSubmissions(sessionUser.role).map((s) =>
+          sanitizeSubmissionForViewer(s, sessionUser)
+        )
+      : [];
+
+    return {
+      accessTier: 'GOVERNANCE_COMMITTEE',
+      sessionUser,
+      destinations,
+      submissions: govSubmissions,
+      certificates: sanitizedCertificates,
+      dualControlApprovals: canReadDualControl ? listDualControlApprovals() : [],
+      auditEvents: canReadAudit ? allAuditEventsInternal : [],
+      auditChainStatus,
+    };
+  }
+
+  // Tier 6: FOUNDER -> Constitutional & Dual-Control Oversight
+  const founderSubmissions = listSubmissions(sessionUser.role).map((s) =>
+    sanitizeSubmissionForViewer(s, sessionUser)
+  );
+  return {
+    accessTier: 'FOUNDER',
+    sessionUser,
+    destinations,
+    submissions: founderSubmissions,
+    certificates: sanitizedCertificates,
+    dualControlApprovals: listDualControlApprovals(),
+    auditEvents: allAuditEventsInternal,
+    auditChainStatus,
+  };
 }
 
 /**
@@ -2004,6 +2497,11 @@ export function fileAppealOnSubmissionServer(params: {
     if (!sub) {
       throw new Error(`SUBMISSION_NOT_FOUND: ${params.submissionId}`);
     }
+    if (sub.applicantUserId !== params.actor.userId) {
+      throw new Error(
+        'APPEAL_OWNERSHIP_FORBIDDEN: Only the original applicant who submitted this dossier may file an appeal.'
+      );
+    }
     if (sub.status !== 'REJECTED') {
       throw new Error(
         `APPEAL_INVALID_STATUS: Only REJECTED submissions may be appealed (current status: ${sub.status}).`
@@ -2237,6 +2735,17 @@ export function updateCertificatePrivacyConsentServer(params: {
     const cert = getCertificateByVerificationId(params.verificationId);
     if (!cert) {
       throw new Error(`CERTIFICATE_NOT_FOUND: ${params.verificationId}`);
+    }
+    const isOwner = params.actor.userId === cert.holderUserId;
+    const isPrivacyOfficer = [
+      'SECURITY_COMPLIANCE_OFFICER',
+      'GOVERNANCE_COMMITTEE',
+      'FOUNDER',
+    ].includes(params.actor.role);
+    if (!isOwner && !isPrivacyOfficer) {
+      throw new Error(
+        'PRIVACY_UPDATE_FORBIDDEN: Only the certificate holder or an authorized privacy governance officer may update certificate privacy consent.'
+      );
     }
     if (cert.status !== 'VALID') {
       throw new Error(

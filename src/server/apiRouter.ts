@@ -11,6 +11,7 @@ import {
   resetLoginAttempts,
 } from './auth';
 import {
+  computeSha256Hex,
   createSignedEvidenceAccessToken,
   verifyAuditChainIntegrity,
   verifySignedEvidenceAccessToken,
@@ -19,6 +20,7 @@ import {
   advanceDestinationStageServer,
   appendAuditEvent,
   authenticateUserSession,
+  buildScopedBootstrapPayload,
   createSubmissionServer,
   executeCryptographicErasureServer,
   executeDualControlCertificateRevocationServer,
@@ -28,15 +30,14 @@ import {
   getDestinationByIdOrCode,
   getEvidenceArtifactById,
   getSubmissionById,
-  getTotpCodeForUser,
   listAuditEvents,
   listCertificates,
   listDestinations,
-  listDualControlApprovals,
   listSubmissions,
   revokeSessionToken,
+  sanitizeCertificateForViewer,
+  sanitizeSubmissionForViewer,
   saveUploadedEvidenceArtifact,
-  TEST_ACCOUNTS_CREDENTIAL_INFO,
   updateCertificatePrivacyConsentServer,
   validateSessionToken,
 } from './db';
@@ -168,18 +169,14 @@ apiRouter.get('/health', (_req: Request, res: Response) => {
   });
 });
 
-// 2. Authentication & Session Endpoints (SEC-AUTH-001)
-apiRouter.get('/auth/accounts', (_req: Request, res: Response) => {
-  const accounts = Object.values(TEST_ACCOUNTS_CREDENTIAL_INFO).map((acc) => ({
-    userId: acc.userId,
-    username: acc.username,
-    role: acc.role,
-    officerCode: acc.officerCode,
-    displayName: acc.displayName,
-    defaultPasswordHint: acc.defaultPassword,
-    currentTotpCode: getTotpCodeForUser(acc.userId),
-  }));
-  res.json({ accounts });
+// 2. Authentication & Session Endpoints (SEC-AUTH-001 & BUG-P0-001 Remediation)
+// Public credential/MFA directory disclosure is permanently disabled.
+apiRouter.all('/auth/accounts', (_req: Request, res: Response) => {
+  return res.status(403).json({
+    error: 'PUBLIC_ACCOUNT_DIRECTORY_DISABLED',
+    message:
+      'Public account directory, password hints, and MFA/TOTP code disclosure are strictly prohibited.',
+  });
 });
 
 apiRouter.post('/auth/login', (req: Request, res: Response) => {
@@ -257,36 +254,11 @@ apiRouter.get('/auth/session', (req: Request, res: Response) => {
   res.json({ authenticated: true, user });
 });
 
-// 3. Authoritative Bootstrap State Endpoint (SEC-DB-001)
+// 3. Authoritative Role-Scoped Bootstrap State Endpoint (SEC-DB-001 & BUG-P0-003 Remediation)
 apiRouter.get('/bootstrap', (req: Request, res: Response) => {
   const sessionUser = resolveSessionUser(req);
-  const destinations = listDestinations();
-  const certificates = listCertificates();
-  const dualControlApprovals = listDualControlApprovals();
-  const auditEvents = listAuditEvents();
-  const auditChainStatus = verifyAuditChainIntegrity(auditEvents);
-
-  let submissions = listSubmissions(sessionUser?.role);
-  if (sessionUser) {
-    const subPerm = evaluateRbacPermission(
-      sessionUser.role,
-      'ACHIEVEMENT_SUBMISSIONS',
-      'READ'
-    );
-    if (!subPerm.allowed) {
-      submissions = [];
-    }
-  }
-
-  res.json({
-    sessionUser,
-    destinations,
-    submissions,
-    certificates,
-    dualControlApprovals,
-    auditEvents,
-    auditChainStatus,
-  });
+  const scopedPayload = buildScopedBootstrapPayload(sessionUser);
+  res.json(scopedPayload);
 });
 
 // 4. Destinations Catalog & Server-Enforced 5-Stage Progression (SEC-GOV-001, SEC-GOV-003)
@@ -326,6 +298,39 @@ apiRouter.post(
   (req: Request, res: Response) => {
     const user = requireAuth(req, res);
     if (!user) return;
+
+    const dest = getDestinationByIdOrCode(req.params.idOrCode);
+    if (!dest) {
+      return res.status(404).json({
+        error: 'NOT_FOUND',
+        message: `DESTINATION_NOT_FOUND: ${req.params.idOrCode}`,
+      });
+    }
+
+    const targetResource: ResourceDomain =
+      dest.researchStage === '4_REVIEWED_AND_APPROVED'
+        ? 'PUBLIC_DESTINATIONS_STAGE_5'
+        : 'DRAFT_RESEARCH_DESTINATIONS_STAGES_1_4';
+
+    const requiredAction: ActionVerb =
+      dest.researchStage === '1_PROPOSED' || dest.researchStage === '2_UNDER_RESEARCH'
+        ? 'UPDATE'
+        : dest.researchStage === '3_RESEARCH_COMPLETED'
+          ? 'APPROVE'
+          : 'PUBLISH';
+
+    const perm = evaluateRbacPermission(
+      user.role,
+      targetResource,
+      requiredAction
+    );
+    if (!perm.allowed) {
+      return res.status(403).json({
+        error: 'GOVERNANCE_FORBIDDEN',
+        ruleCode: perm.ruleCode,
+        message: perm.explanation,
+      });
+    }
 
     try {
       const result = advanceDestinationStageServer({
@@ -408,7 +413,8 @@ apiRouter.post('/evidence/upload', (req: Request, res: Response) => {
       permitReferenceCode,
     });
     const saved = saveUploadedEvidenceArtifact(user, parsedArtifact);
-    return res.status(201).json({ artifact: saved });
+    const { vaultStorageKey: _omitKey, ...sanitizedSaved } = saved;
+    return res.status(201).json({ artifact: sanitizedSaved });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Evidence ingestion failed.';
     if (msg.startsWith('DUPLICATE_EVIDENCE_SHA256_DETECTED')) {
@@ -520,8 +526,9 @@ apiRouter.get(
       return res.status(404).json({ error: 'ARTIFACT_NOT_FOUND' });
     }
 
+    const { vaultStorageKey: _omitKey, ...sanitizedArtifact } = record.artifact;
     return res.json({
-      artifact: record.artifact,
+      artifact: sanitizedArtifact,
       vaultAccessVerified: true,
       viewerUserId: user.userId,
     });
@@ -537,12 +544,26 @@ apiRouter.get('/submissions', (req: Request, res: Response) => {
   if (
     user.role === 'REGISTERED_ADVENTURER' ||
     user.role === 'PREMIUM_MEMBER_FUTURE' ||
-    user.role === 'VERIFIED_GUIDE'
+    user.role === 'VERIFIED_GUIDE' ||
+    user.role === 'ORGANIZATION_ADMIN' ||
+    user.role === 'DESTINATION_PARTNER'
   ) {
     submissions = submissions.filter((s) => s.applicantUserId === user.userId);
+  } else if (
+    user.role === 'VERIFICATION_OFFICER' ||
+    user.role === 'SENIOR_VERIFICATION_LEAD'
+  ) {
+    submissions = submissions.filter((s) => s.status !== 'APPEALED');
+  } else if (user.role === 'APPEAL_OFFICER') {
+    submissions = submissions.filter(
+      (s) =>
+        s.status === 'APPEALED' &&
+        !s.appealRecord?.originalReviewerUserIdsBlocked.includes(user.userId)
+    );
   }
 
-  res.json({ submissions });
+  const sanitized = submissions.map((s) => sanitizeSubmissionForViewer(s, user));
+  res.json({ submissions: sanitized });
 });
 
 apiRouter.post('/submissions', (req: Request, res: Response) => {
@@ -572,7 +593,9 @@ apiRouter.post('/submissions', (req: Request, res: Response) => {
       evidenceArtifactIds: req.body.evidenceArtifactIds,
       inlineArtifacts: req.body.inlineArtifacts,
     });
-    return res.status(201).json({ submission: created });
+    return res.status(201).json({
+      submission: sanitizeSubmissionForViewer(created, user),
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Submission creation failed.';
     if (msg.startsWith('DUPLICATE_EVIDENCE')) {
@@ -616,7 +639,12 @@ apiRouter.post('/submissions/:id/review', (req: Request, res: Response) => {
       coiHumanAttestationSigned: Boolean(req.body.coiHumanAttestationSigned),
       reasonCode: req.body.reasonCode,
     });
-    return res.json(result);
+    return res.json({
+      submission: sanitizeSubmissionForViewer(result.submission, user),
+      issuedCertificate: result.issuedCertificate
+        ? sanitizeCertificateForViewer(result.issuedCertificate, user)
+        : undefined,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Review execution failed.';
     if (
@@ -643,9 +671,12 @@ apiRouter.post('/submissions/:id/appeal', (req: Request, res: Response) => {
         req.body.supplementaryEvidenceSummary ||
         'Supplementary forensic telemetry attached.',
     });
-    return res.json({ submission: updated });
+    return res.json({ submission: sanitizeSubmissionForViewer(updated, user) });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to file appeal.';
+    if (msg.startsWith('APPEAL_OWNERSHIP_FORBIDDEN')) {
+      return res.status(403).json({ error: 'APPEAL_OWNERSHIP_FORBIDDEN', message: msg });
+    }
     return res.status(400).json({ error: 'APPEAL_FILING_ERROR', message: msg });
   }
 });
@@ -668,30 +699,9 @@ apiRouter.get('/verify/:verificationId', (req: Request, res: Response) => {
     });
   }
 
-  // Return privacy-filtered public projection (never exposes raw GPX files or internal UUIDs)
+  // Return privacy-filtered public projection (never exposes raw GPX files, holderUserId, or internal UUIDs)
   return res.json({
-    certificate: {
-      verificationId: cert.verificationId,
-      holderPublicDisplay: cert.holderPublicDisplay,
-      holderPrivacyMode: cert.holderPrivacyMode,
-      holderNationality: cert.holderNationality,
-      destinationCode: cert.destinationCode,
-      destinationNameEn: cert.destinationNameEn,
-      destinationNameNe: cert.destinationNameNe,
-      verifiedElevationM: cert.verifiedElevationM,
-      verifiedElevationFt: cert.verifiedElevationFt,
-      elevationSourceCitation: cert.elevationSourceCitation,
-      routeName: cert.routeName,
-      verificationTrack: cert.verificationTrack,
-      publicCompletionDateDisplay: cert.publicCompletionDateDisplay,
-      issuedAtUtc: cert.issuedAtUtc,
-      status: cert.status,
-      revocationOrCorrectionNote: cert.revocationOrCorrectionNote,
-      reviewingOfficersCodes: cert.reviewingOfficersCodes,
-      badgeCode: cert.badgeCode,
-      certificateIntegrityDigest: cert.certificateIntegrityDigest,
-      optInPublicLeaderboards: cert.optInPublicLeaderboards,
-    },
+    certificate: sanitizeCertificateForViewer(cert, null),
   });
 });
 
@@ -724,27 +734,41 @@ apiRouter.post(
   }
 );
 
-apiRouter.patch(
-  '/certificates/:verificationId/privacy',
-  (req: Request, res: Response) => {
-    const user = requireAuth(req, res);
-    if (!user) return;
+const handleCertificatePrivacyUpdate = (req: Request, res: Response) => {
+  const user = requireAuth(req, res);
+  if (!user) return;
 
-    try {
-      const updated = updateCertificatePrivacyConsentServer({
-        actor: user,
-        verificationId: req.params.verificationId,
-        publicIdentityMode: req.body.publicIdentityMode,
-        publicDatePrecision: req.body.publicDatePrecision,
-        optInPublicLeaderboards: Boolean(req.body.optInPublicLeaderboards),
-      });
-      return res.json({ certificate: updated });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Privacy update failed.';
-      return res.status(400).json({ error: 'PRIVACY_UPDATE_ERROR', message: msg });
+  try {
+    const updated = updateCertificatePrivacyConsentServer({
+      actor: user,
+      verificationId: req.params.verificationId,
+      publicIdentityMode:
+        req.body.publicIdentityMode ||
+        req.body.holderPrivacyMode ||
+        'FULL_NAME',
+      publicDatePrecision:
+        req.body.publicDatePrecision ||
+        req.body.holderDatePrecision ||
+        'EXACT_DATE',
+      optInPublicLeaderboards: Boolean(req.body.optInPublicLeaderboards),
+    });
+    return res.json({
+      certificate: sanitizeCertificateForViewer(updated, user),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Privacy update failed.';
+    if (msg.startsWith('PRIVACY_UPDATE_FORBIDDEN')) {
+      return res.status(403).json({ error: 'PRIVACY_UPDATE_FORBIDDEN', message: msg });
     }
+    if (msg.startsWith('CERTIFICATE_NOT_FOUND')) {
+      return res.status(404).json({ error: 'NOT_FOUND', message: msg });
+    }
+    return res.status(400).json({ error: 'PRIVACY_UPDATE_ERROR', message: msg });
   }
-);
+};
+
+apiRouter.patch('/certificates/:verificationId/privacy', handleCertificatePrivacyUpdate);
+apiRouter.post('/certificates/:verificationId/privacy', handleCertificatePrivacyUpdate);
 
 apiRouter.post('/privacy/erasure', (req: Request, res: Response) => {
   const user = requireAuth(req, res);
@@ -777,7 +801,7 @@ apiRouter.post('/privacy/erasure', (req: Request, res: Response) => {
   }
 });
 
-// 8. Server-Computed Verified Leaderboards (Phase 14)
+// 8. Server-Computed Verified Leaderboards (Phase 14 — Privacy-Preserving Public Projection)
 apiRouter.get('/leaderboards', (_req: Request, res: Response) => {
   const validOptInCerts = listCertificates().filter(
     (c) => c.status === 'VALID' && c.optInPublicLeaderboards
@@ -786,7 +810,7 @@ apiRouter.get('/leaderboards', (_req: Request, res: Response) => {
   const grouped: Record<
     string,
     {
-      holderUserId: string;
+      standingEntryKey: string;
       displayName: string;
       nationality: string;
       verifiedCount: number;
@@ -797,9 +821,10 @@ apiRouter.get('/leaderboards', (_req: Request, res: Response) => {
   > = {};
 
   for (const cert of validOptInCerts) {
-    if (!grouped[cert.holderUserId]) {
-      grouped[cert.holderUserId] = {
-        holderUserId: cert.holderUserId,
+    const entryKey = `ldr_${computeSha256Hex(`standing:${cert.holderUserId}`).slice(0, 12)}`;
+    if (!grouped[entryKey]) {
+      grouped[entryKey] = {
+        standingEntryKey: entryKey,
         displayName: cert.holderPublicDisplay,
         nationality: cert.holderNationality,
         verifiedCount: 0,
@@ -808,7 +833,7 @@ apiRouter.get('/leaderboards', (_req: Request, res: Response) => {
         badges: [],
       };
     }
-    const g = grouped[cert.holderUserId];
+    const g = grouped[entryKey];
     g.verifiedCount += 1;
     g.cumulativeElevationM += cert.verifiedElevationM;
     if (cert.verifiedElevationM > g.highestApexM) {
@@ -870,8 +895,26 @@ apiRouter.post('/blockchain/mint', (_req: Request, res: Response) => {
   });
 });
 
-// 12. Sanitized & Audited Server-Side Advisory AI Assistant (SEC-API-002)
+// 12. Sanitized & Audited Server-Side Advisory AI Assistant (SEC-API-002 & BUG-P1-004)
 apiRouter.post('/ai/advisory-brief', async (req: Request, res: Response) => {
+  const sessionUser = requireAuth(req, res);
+  if (!sessionUser) return;
+
+  const allowedAdvisoryRoles = [
+    'VERIFICATION_OFFICER',
+    'SENIOR_VERIFICATION_LEAD',
+    'APPEAL_OFFICER',
+    'DESTINATION_RESEARCHER',
+    'GOVERNANCE_COMMITTEE',
+    'FOUNDER',
+  ];
+  if (!allowedAdvisoryRoles.includes(sessionUser.role)) {
+    return res.status(403).json({
+      error: 'ADVISORY_AI_FORBIDDEN',
+      message: `Role (${sessionUser.role}) is not authorized to request internal verification forensic briefings.`,
+    });
+  }
+
   const { destinationId, destinationCode } = req.body as {
     destinationId?: string;
     destinationCode?: string;
@@ -886,10 +929,9 @@ apiRouter.post('/ai/advisory-brief', async (req: Request, res: Response) => {
     });
   }
 
-  const sessionUser = resolveSessionUser(req);
   appendAuditEvent({
-    actorInternalUuid: sessionUser?.internalActorUuid || 'act-uuid-advisory-ai',
-    actorRole: sessionUser?.role || 'VERIFICATION_OFFICER',
+    actorInternalUuid: sessionUser.internalActorUuid,
+    actorRole: sessionUser.role,
     actionType: 'ADVISORY_AI_BRIEF_REQUESTED',
     targetEntityType: 'DESTINATION_RECORD',
     targetEntityId: canonicalDest.code,

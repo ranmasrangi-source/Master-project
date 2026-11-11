@@ -25,23 +25,25 @@ export function assertNoXxeOrMaliciousDirectives(rawBuffer: Buffer, fileName: st
   const sampleText = rawBuffer.toString('utf8', 0, Math.min(rawBuffer.length, 256 * 1024));
   const xxePatterns = [
     /<!DOCTYPE[^>]*\[/i,
+    /<!DOCTYPE\b/i,
     /<!ENTITY/i,
     /SYSTEM\s+["'][^"']*["']/i,
     /PUBLIC\s+["'][^"']*["']/i,
     /xmlns:xi=/i,
     /<xi:include/i,
+    /<script\b/i,
   ];
 
   for (const pattern of xxePatterns) {
     if (pattern.test(sampleText)) {
       throw new Error(
-        `XXE_PAYLOAD_DETECTED_AND_BLOCKED: File "${fileName}" contains forbidden XML DTD/ENTITY directives.`
+        `XXE_PAYLOAD_DETECTED_AND_BLOCKED: File "${fileName}" contains forbidden XML DTD/ENTITY/script directives.`
       );
     }
   }
 
   if (fileName.toLowerCase().endsWith('.pdf')) {
-    if (/\/JavaScript\b|\/JS\b|\/Launch\b/i.test(sampleText)) {
+    if (/\/JavaScript\b|\/JS\b|\/Launch\b|\/RichMedia\b|\/SubmitForm\b/i.test(sampleText)) {
       throw new Error(
         `MALICIOUS_PDF_DIRECTIVE_BLOCKED: File "${fileName}" contains forbidden embedded JavaScript/Launch actions.`
       );
@@ -118,10 +120,12 @@ export function validateEvidenceFileMagicBytes(
 }
 
 /**
- * SEC-EVID-001:
- * Parses a GPX XML document, extracts trackpoints, computes Haversine summit distance,
- * maximum elevation, rolling 15-minute ascent rate (m/hr), barometric channel presence,
- * and masks residential start/end coordinates.
+ * SEC-EVID-001 & BUG-P1-006:
+ * Parses a GPX XML document, validates WGS84 coordinate bounds, checks monotonic timestamp
+ * consistency, detects GPS spoofing indicators (teleportation velocity, altitude jumps,
+ * duplicate/backwards timestamps), computes Haversine summit distance, maximum elevation,
+ * rolling 15-minute ascent rate (m/hr), barometric channel presence, and masks residential
+ * start/end coordinates.
  */
 export function parseGpxTelemetryBuffer(
   rawBuffer: Buffer,
@@ -136,6 +140,8 @@ export function parseGpxTelemetryBuffer(
   deviceModel: string;
   barometricChannelDetected: boolean;
   residentialStartEndMasked: boolean;
+  gpsTimestampConsistent: boolean;
+  spoofingIndicators: string[];
 } {
   const xml = rawBuffer.toString('utf8');
 
@@ -161,13 +167,83 @@ export function parseGpxTelemetryBuffer(
     const timeMatch = inner.match(/<time>([^<]+)<\/time>/i);
     const ele = eleMatch ? parseFloat(eleMatch[1]) : 0;
     const timeUtc = timeMatch ? timeMatch[1].trim() : undefined;
-    if (Number.isFinite(lat) && Number.isFinite(lon) && Number.isFinite(ele)) {
-      rawPoints.push({ lat, lon, ele, timeUtc });
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(ele)) {
+      throw new Error('GPX_INVALID_NUMERIC_COORDINATE: Trackpoint contains non-numeric coordinates.');
     }
+    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+      throw new Error(
+        `GPX_OUT_OF_BOUNDS_COORDINATES: Trackpoint (${lat}, ${lon}) violates WGS84 bounds.`
+      );
+    }
+    if (ele < -500 || ele > 9500) {
+      throw new Error(
+        `GPX_IMPOSSIBLE_ELEVATION: Trackpoint elevation (${ele}m) is outside terrestrial bounds (-500m..9500m).`
+      );
+    }
+    rawPoints.push({ lat, lon, ele, timeUtc });
   }
 
   if (rawPoints.length === 0) {
     throw new Error('GPX_NO_TRACKPOINTS: Uploaded GPX file contains zero valid <trkpt> coordinates.');
+  }
+
+  const spoofingIndicators: string[] = [];
+  let gpsTimestampConsistent = true;
+  let prevTimestampMs: number | null = null;
+
+  for (let i = 0; i < rawPoints.length; i++) {
+    const pt = rawPoints[i];
+    if (pt.timeUtc) {
+      const parsedMs = Date.parse(pt.timeUtc);
+      if (!Number.isFinite(parsedMs)) {
+        gpsTimestampConsistent = false;
+        spoofingIndicators.push(`MALFORMED_TIMESTAMP_AT_INDEX_${i}`);
+      } else {
+        if (prevTimestampMs !== null) {
+          if (parsedMs < prevTimestampMs) {
+            gpsTimestampConsistent = false;
+            spoofingIndicators.push(
+              `NON_MONOTONIC_BACKWARDS_TIMESTAMP: Point #${i} timestamp precedes point #${i - 1}.`
+            );
+          } else if (parsedMs === prevTimestampMs) {
+            gpsTimestampConsistent = false;
+            spoofingIndicators.push(
+              `DUPLICATE_TIMESTAMP_ZERO_DELTA: Point #${i} has identical timestamp to point #${i - 1}.`
+            );
+          } else {
+            const dtSeconds = (parsedMs - prevTimestampMs) / 1000;
+            const prevPt = rawPoints[i - 1];
+            const horizDistM = haversineDistanceMeters(
+              prevPt.lat,
+              prevPt.lon,
+              pt.lat,
+              pt.lon
+            );
+            const horizSpeedMps = horizDistM / dtSeconds;
+            const vertRateMPerHr = Math.abs(pt.ele - prevPt.ele) / (dtSeconds / 3600);
+
+            if (horizSpeedMps > 45 && dtSeconds < 600) {
+              spoofingIndicators.push(
+                `TELEPORTATION_VELOCITY_ANOMALY: Segment #${i - 1}->#${i} horizontal velocity ${horizSpeedMps.toFixed(1)} m/s exceeds plausible foot/mountaineering physics.`
+              );
+            }
+            if (vertRateMPerHr > 2500 && Math.abs(pt.ele - prevPt.ele) > 150) {
+              spoofingIndicators.push(
+                `EXTREME_VERTICAL_JUMP_ANOMALY: Segment #${i - 1}->#${i} vertical rate ${Math.round(vertRateMPerHr)} m/hr indicates synthetic altitude injection or aircraft transport.`
+              );
+            }
+          }
+        }
+        prevTimestampMs = parsedMs;
+      }
+    }
+  }
+
+  if (/fakegpx|gpsjoystick|mocklocation|spoof/i.test(deviceModel)) {
+    spoofingIndicators.push(
+      `SUSPICIOUS_CREATOR_TAG: GPX creator "${deviceModel}" matches known GPS spoofing generator.`
+    );
   }
 
   // Mask residential start/end points
@@ -210,7 +286,7 @@ export function parseGpxTelemetryBuffer(
       if (!Number.isFinite(t2) || t2 <= t1) continue;
 
       const dtHours = (t2 - t1) / (1000 * 3600);
-      // Evaluate window of at least 0.15 hours (9 minutes) up to 1.0 hour
+      // Evaluate window of at least 0.15 hours (9 minutes) up to 1.5 hours
       if (dtHours >= 0.15 && dtHours <= 1.5) {
         const dEle = p2.ele - p1.ele;
         if (dEle > 0) {
@@ -227,6 +303,15 @@ export function parseGpxTelemetryBuffer(
     maxAscentRateMPerHr = 240; // Default nominal rate when track contains <2 timestamped intervals
   }
 
+  if (
+    maxAscentRateMPerHr >
+    destination.telemetryEnvelope.maxPlausibleAscentRateMPerHr
+  ) {
+    spoofingIndicators.push(
+      `ENVELOPE_ASCENT_RATE_EXCEEDED: Rolling 15m ascent rate (${maxAscentRateMPerHr} m/hr) exceeds destination threshold (${destination.telemetryEnvelope.maxPlausibleAscentRateMPerHr} m/hr).`
+    );
+  }
+
   return {
     trackpointCount: rawPoints.length,
     maskedResidentialTrackpointsCount: maskedResult.removedCount,
@@ -237,13 +322,16 @@ export function parseGpxTelemetryBuffer(
     deviceModel,
     barometricChannelDetected,
     residentialStartEndMasked: maskedResult.residentialStartEndMasked,
+    gpsTimestampConsistent,
+    spoofingIndicators,
   };
 }
 
 /**
- * SEC-EVID-001:
- * Extracts EXIF metadata strings (Camera Model, Software tag, DateTimeOriginal)
- * and computes a perceptual content fingerprint from image bytes.
+ * SEC-EVID-001 & BUG-P1-006:
+ * Extracts EXIF metadata strings (Camera Model, Software tag, DateTimeOriginal),
+ * detects editing/AI manipulation software signatures, and computes a perceptual
+ * content fingerprint from image bytes.
  */
 export function parsePhotoExifBuffer(
   rawBuffer: Buffer,
@@ -255,6 +343,8 @@ export function parsePhotoExifBuffer(
   exifSoftwareTag: string;
   perceptualHash: string;
   residentialStartEndMasked: boolean;
+  exifTamperingIndicator: boolean;
+  spoofingIndicators: string[];
 } {
   const asciiSlice = rawBuffer.toString(
     'latin1',
@@ -269,12 +359,26 @@ export function parsePhotoExifBuffer(
     /(\d{4}):(\d{2}):(\d{2})\s+(\d{2}:\d{2}:\d{2})/
   );
   const softwareMatch = asciiSlice.match(
-    /(Firmware\s+v[0-9.]+|iOS\s+[0-9.]+|Adobe\s+Photoshop|Lightroom)/i
+    /(Firmware\s+v[0-9.]+|iOS\s+[0-9.]+|Adobe\s+Photoshop|Lightroom|GIMP|Midjourney|Stable\s+Diffusion|DALL-E)/i
   );
 
   const captureTimestampUtc = dateMatch
     ? `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}T${dateMatch[4]}Z`
     : new Date().toISOString();
+
+  const spoofingIndicators: string[] = [];
+  let exifTamperingIndicator = false;
+  if (
+    softwareMatch &&
+    /Photoshop|Lightroom|GIMP|Midjourney|Stable\s+Diffusion|DALL-E/i.test(
+      softwareMatch[1]
+    )
+  ) {
+    exifTamperingIndicator = true;
+    spoofingIndicators.push(
+      `EXIF_EDITING_OR_SYNTHETIC_SOFTWARE_TAG: Detected "${softwareMatch[1]}" in image header.`
+    );
+  }
 
   // Compute deterministic 64-bit block average perceptual hash over image payload
   const step = Math.max(1, Math.floor(rawBuffer.length / 64));
@@ -306,6 +410,8 @@ export function parsePhotoExifBuffer(
       : 'Original Camera Header (No Editing Signature)',
     perceptualHash: `pHash:${bitsHex}`,
     residentialStartEndMasked: true,
+    exifTamperingIndicator,
+    spoofingIndicators,
   };
 }
 
@@ -321,10 +427,14 @@ export function ingestEvidenceFile(params: {
   destination: DestinationRecord;
   permitReferenceCode?: string;
 }): EvidenceArtifact {
+  const safeFileName = path
+    .basename(params.fileName)
+    .replace(/[^a-zA-Z0-9._-]/g, '_');
+
   const mimeType = validateEvidenceFileMagicBytes(
     params.rawBuffer,
     params.artifactType,
-    params.fileName
+    safeFileName
   );
 
   const sha256PostUploadDigest = computeSha256Hex(params.rawBuffer);
@@ -342,7 +452,7 @@ export function ingestEvidenceFile(params: {
     return {
       id: artifactId,
       type: params.artifactType,
-      fileName: params.fileName,
+      fileName: safeFileName,
       fileSizeBytes: params.rawBuffer.length,
       mimeType,
       sha256PostUploadDigest,
@@ -358,6 +468,8 @@ export function ingestEvidenceFile(params: {
         maskedResidentialTrackpointsCount: gpxMeta.maskedResidentialTrackpointsCount,
         residentialStartEndMasked: gpxMeta.residentialStartEndMasked,
         barometricChannelDetected: gpxMeta.barometricChannelDetected,
+        gpsTimestampConsistent: gpxMeta.gpsTimestampConsistent,
+        spoofingIndicators: gpxMeta.spoofingIndicators,
         permitReferenceCode: params.permitReferenceCode,
       },
     };
@@ -368,7 +480,7 @@ export function ingestEvidenceFile(params: {
     return {
       id: artifactId,
       type: params.artifactType,
-      fileName: params.fileName,
+      fileName: safeFileName,
       fileSizeBytes: params.rawBuffer.length,
       mimeType,
       sha256PostUploadDigest,
@@ -381,6 +493,8 @@ export function ingestEvidenceFile(params: {
         recordedMaxElevationM: exifMeta.recordedMaxElevationM,
         exifSoftwareTag: exifMeta.exifSoftwareTag,
         residentialStartEndMasked: exifMeta.residentialStartEndMasked,
+        exifTamperingIndicator: exifMeta.exifTamperingIndicator,
+        spoofingIndicators: exifMeta.spoofingIndicators,
       },
     };
   }
@@ -398,7 +512,7 @@ export function ingestEvidenceFile(params: {
   return {
     id: artifactId,
     type: params.artifactType,
-    fileName: params.fileName,
+    fileName: safeFileName,
     fileSizeBytes: params.rawBuffer.length,
     mimeType,
     sha256PostUploadDigest,

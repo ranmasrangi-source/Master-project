@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { UserRole } from '../types/platform';
 
 const PRIVILEGED_MFA_ROLES: UserRole[] = [
+  'DESTINATION_RESEARCHER',
   'VERIFICATION_OFFICER',
   'SENIOR_VERIFICATION_LEAD',
   'APPEAL_OFFICER',
@@ -15,29 +16,97 @@ export function roleRequiresMfa(role: UserRole): boolean {
   return PRIVILEGED_MFA_ROLES.includes(role);
 }
 
+const SCRYPT_N = 16384;
+const SCRYPT_R = 8;
+const SCRYPT_P = 1;
+const SCRYPT_KEYLEN = 64;
+const SCRYPT_MAXMEM = 32 * 1024 * 1024;
+
 /**
- * SEC-AUTH-001:
- * Hashes a user password using Node.js crypto.scryptSync with a 128-bit random salt.
+ * SEC-AUTH-001 & BUG-P0-002 Remediation:
+ * Hashes a user password using Node.js crypto.scryptSync with a freshly generated
+ * cryptographically secure 128-bit (16-byte) unique random salt per invocation.
+ * Fixed or caller-supplied salts are strictly prohibited to prevent salt reuse.
  */
-export function hashPasswordScrypt(password: string, saltHex?: string): string {
-  const salt = saltHex ? Buffer.from(saltHex, 'hex') : crypto.randomBytes(16);
-  const derived = crypto.scryptSync(password, salt, 64);
-  return `${salt.toString('hex')}:${derived.toString('hex')}`;
+export function hashPasswordScrypt(password: string): string {
+  if (!password || password.length < 8) {
+    throw new Error('Password must be at least 8 characters long.');
+  }
+  const salt = crypto.randomBytes(16); // Always unique 128-bit CSPRNG salt
+  const derived = crypto.scryptSync(password, salt, SCRYPT_KEYLEN, {
+    N: SCRYPT_N,
+    r: SCRYPT_R,
+    p: SCRYPT_P,
+    maxmem: SCRYPT_MAXMEM,
+  });
+  return `scrypt$${SCRYPT_N}$${SCRYPT_R}$${SCRYPT_P}$${salt.toString('hex')}$${derived.toString('hex')}`;
 }
 
 /**
- * SEC-AUTH-001:
+ * Extracts the hex salt from a stored password hash string for auditing salt uniqueness.
+ */
+export function extractSaltHexFromStoredHash(storedHash: string): string | null {
+  if (!storedHash) return null;
+  if (storedHash.startsWith('scrypt$')) {
+    const parts = storedHash.split('$');
+    return parts.length === 6 ? parts[4] : null;
+  }
+  const legacyParts = storedHash.split(':');
+  return legacyParts.length === 2 ? legacyParts[0] : null;
+}
+
+/**
+ * SEC-AUTH-001 & BUG-P0-002:
  * Verifies a user password in constant time using crypto.timingSafeEqual.
  */
 export function verifyPasswordScrypt(password: string, storedHash: string): boolean {
+  if (!password || !storedHash) return false;
+
+  if (storedHash.startsWith('scrypt$')) {
+    const parts = storedHash.split('$');
+    if (parts.length !== 6) return false;
+    const n = Number(parts[1]);
+    const r = Number(parts[2]);
+    const p = Number(parts[3]);
+    const saltHex = parts[4];
+    const keyHex = parts[5];
+    if (!Number.isFinite(n) || !Number.isFinite(r) || !Number.isFinite(p)) {
+      return false;
+    }
+    const salt = Buffer.from(saltHex, 'hex');
+    const expected = Buffer.from(keyHex, 'hex');
+    if (salt.length < 16 || expected.length !== SCRYPT_KEYLEN) return false;
+    const derived = crypto.scryptSync(password, salt, expected.length, {
+      N: n,
+      r,
+      p,
+      maxmem: SCRYPT_MAXMEM,
+    });
+    if (derived.length !== expected.length) return false;
+    return crypto.timingSafeEqual(derived, expected);
+  }
+
   const parts = storedHash.split(':');
   if (parts.length !== 2) return false;
   const [saltHex, keyHex] = parts;
   const salt = Buffer.from(saltHex, 'hex');
   const expected = Buffer.from(keyHex, 'hex');
-  const derived = crypto.scryptSync(password, salt, expected.length);
+  if (salt.length < 16 || expected.length === 0) return false;
+  const derived = crypto.scryptSync(password, salt, expected.length, {
+    N: SCRYPT_N,
+    r: SCRYPT_R,
+    p: SCRYPT_P,
+    maxmem: SCRYPT_MAXMEM,
+  });
   if (derived.length !== expected.length) return false;
   return crypto.timingSafeEqual(derived, expected);
+}
+
+/**
+ * Generates an independent 160-bit (20-byte) CSPRNG secret in hex for RFC 6238 TOTP MFA.
+ */
+export function generateRandomMfaSecretHex(): string {
+  return crypto.randomBytes(20).toString('hex');
 }
 
 /**

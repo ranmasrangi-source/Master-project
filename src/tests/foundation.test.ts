@@ -25,6 +25,7 @@ import {
   configureKeyRing,
   createSignedEvidenceAccessToken,
   generateNonEnumerableVerificationId,
+  initializeProcessHmacKey,
   verifyAuditChainIntegrity,
   verifyHmacTimingSafe,
   verifySignedEvidenceAccessToken,
@@ -41,9 +42,9 @@ import {
   getDb,
   getDestinationByIdOrCode,
   getSubmissionById,
+  getTestOnlyAccountCredentials,
   listAuditEvents,
   resetDatabase,
-  TEST_ACCOUNTS_CREDENTIAL_INFO,
 } from '../server/db';
 import {
   assertNoXxeOrMaliciousDirectives,
@@ -235,13 +236,7 @@ describe('SEC-CRYPTO-002: Genuine NIST SHA-256 & RFC 4231 HMAC-SHA256 Vector Sui
     );
     expect(sigV2.keyVersion).toBe('v2');
     expect(sigV2.hmac).toHaveLength(64);
-    configureKeyRing(
-      'v1',
-      Buffer.from(
-        '8848f00d9a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef01234567',
-        'hex'
-      )
-    );
+    configureKeyRing('v1', initializeProcessHmacKey());
   });
 });
 
@@ -372,7 +367,7 @@ describe('SEC-AUTH-001: Authentication, Scrypt Password Hashing, TOTP MFA, Sessi
   });
 
   it('requires TOTP MFA for privileged roles, issues CSPRNG sessions, and enforces brute-force rate limiting', async () => {
-    const verifierAcct = TEST_ACCOUNTS_CREDENTIAL_INFO['usr-reviewer-219'];
+    const verifierAcct = getTestOnlyAccountCredentials('usr-reviewer-219');
     resetLoginAttempts(`login:${verifierAcct.username.toLowerCase()}`);
 
     // Privileged role login WITHOUT TOTP must fail with 401 MFA_VERIFICATION_FAILED
@@ -380,7 +375,7 @@ describe('SEC-AUTH-001: Authentication, Scrypt Password Hashing, TOTP MFA, Sessi
       method: 'POST',
       body: {
         username: verifierAcct.username,
-        password: verifierAcct.defaultPassword,
+        password: verifierAcct.ephemeralPassword,
       },
     });
     expect(noMfaRes.status).toBe(401);
@@ -392,7 +387,7 @@ describe('SEC-AUTH-001: Authentication, Scrypt Password Hashing, TOTP MFA, Sessi
       method: 'POST',
       body: {
         username: verifierAcct.username,
-        password: verifierAcct.defaultPassword,
+        password: verifierAcct.ephemeralPassword,
         totpCode: validTotp,
       },
     });
@@ -402,7 +397,7 @@ describe('SEC-AUTH-001: Authentication, Scrypt Password Hashing, TOTP MFA, Sessi
     expect(loginRes.body.user.mfaVerified).toBe(true);
 
     // Brute-force rate limiting check after 5 failed attempts
-    const advAcct = TEST_ACCOUNTS_CREDENTIAL_INFO['usr-lukas-at'];
+    const advAcct = getTestOnlyAccountCredentials('usr-lukas-at');
     resetLoginAttempts(`login:${advAcct.username.toLowerCase()}`);
     for (let i = 0; i < 5; i++) {
       await apiFetch('/api/v1/auth/login', {
@@ -417,7 +412,7 @@ describe('SEC-AUTH-001: Authentication, Scrypt Password Hashing, TOTP MFA, Sessi
       method: 'POST',
       body: {
         username: advAcct.username,
-        password: advAcct.defaultPassword,
+        password: advAcct.ephemeralPassword,
       },
     });
     expect(rateLimitedRes.status).toBe(429);
@@ -428,22 +423,23 @@ describe('SEC-AUTH-001: Authentication, Scrypt Password Hashing, TOTP MFA, Sessi
 
 describe('SEC-GOV-001 & SEC-GOV-003: Backend Destination Governance & Two-Person (2P) Dual-Control', () => {
   it('allows Researcher to advance Stages 1 -> 2 -> 3, blocks Researcher from Stage 4, and enforces Two-Person (2P) distinct principals for Stages 4 and 5', () => {
-    const resAcct = TEST_ACCOUNTS_CREDENTIAL_INFO['usr-researcher-501'];
-    const founderAcct = TEST_ACCOUNTS_CREDENTIAL_INFO['usr-gov-founder-001'];
-    const committeeAcct = TEST_ACCOUNTS_CREDENTIAL_INFO['usr-gov-committee-002'];
+    const resAcct = getTestOnlyAccountCredentials('usr-researcher-501');
+    const founderAcct = getTestOnlyAccountCredentials('usr-gov-founder-001');
+    const committeeAcct = getTestOnlyAccountCredentials('usr-gov-committee-002');
 
     const researcherSession = authenticateUserSession({
       usernameOrUserId: resAcct.username,
-      password: resAcct.defaultPassword,
+      password: resAcct.ephemeralPassword,
+      totpCode: generateTotpCode(resAcct.mfaSecretHex),
     });
     const founderSession = authenticateUserSession({
       usernameOrUserId: founderAcct.username,
-      password: founderAcct.defaultPassword,
+      password: founderAcct.ephemeralPassword,
       totpCode: generateTotpCode(founderAcct.mfaSecretHex),
     });
     const committeeSession = authenticateUserSession({
       usernameOrUserId: committeeAcct.username,
-      password: committeeAcct.defaultPassword,
+      password: committeeAcct.ephemeralPassword,
       totpCode: generateTotpCode(committeeAcct.mfaSecretHex),
     });
 
@@ -507,17 +503,17 @@ describe('SEC-GOV-001 & SEC-GOV-003: Backend Destination Governance & Two-Person
   });
 
   it('enforces Two-Person (2P) Dual-Control on Certificate Revocation', () => {
-    const founderAcct = TEST_ACCOUNTS_CREDENTIAL_INFO['usr-gov-founder-001'];
-    const leadAcct = TEST_ACCOUNTS_CREDENTIAL_INFO['usr-senior-lead-301'];
+    const founderAcct = getTestOnlyAccountCredentials('usr-gov-founder-001');
+    const leadAcct = getTestOnlyAccountCredentials('usr-senior-lead-301');
 
     const founderSession = authenticateUserSession({
       usernameOrUserId: founderAcct.username,
-      password: founderAcct.defaultPassword,
+      password: founderAcct.ephemeralPassword,
       totpCode: generateTotpCode(founderAcct.mfaSecretHex),
     });
     const seniorLeadSession = authenticateUserSession({
       usernameOrUserId: leadAcct.username,
-      password: leadAcct.defaultPassword,
+      password: leadAcct.ephemeralPassword,
       totpCode: generateTotpCode(leadAcct.mfaSecretHex),
     });
 
@@ -553,10 +549,10 @@ describe('SEC-GOV-001 & SEC-GOV-003: Backend Destination Governance & Two-Person
 
 describe('SEC-GOV-002: Server-Side Human Verification, Tier-A Dual Review, Split-Decision Escalation & Appeals', () => {
   it('completes Tier-A Dual-Review on sub-queue-101 with 2nd independent officer and issues free 128-bit CSPRNG certificate', () => {
-    const officer219Acct = TEST_ACCOUNTS_CREDENTIAL_INFO['usr-reviewer-219'];
+    const officer219Acct = getTestOnlyAccountCredentials('usr-reviewer-219');
     const officer219Session = authenticateUserSession({
       usernameOrUserId: officer219Acct.username,
-      password: officer219Acct.defaultPassword,
+      password: officer219Acct.ephemeralPassword,
       totpCode: generateTotpCode(officer219Acct.mfaSecretHex),
     });
 
@@ -575,22 +571,22 @@ describe('SEC-GOV-002: Server-Side Human Verification, Tier-A Dual Review, Split
   });
 
   it('escalates split decisions (1 APPROVE + 1 REJECT) on Tier-A submissions to ESCALATED_SPLIT_DECISION', () => {
-    const advAcct = TEST_ACCOUNTS_CREDENTIAL_INFO['usr-tenzing-nepal'];
-    const officer219Acct = TEST_ACCOUNTS_CREDENTIAL_INFO['usr-reviewer-219'];
-    const officer104Acct = TEST_ACCOUNTS_CREDENTIAL_INFO['usr-reviewer-104'];
+    const advAcct = getTestOnlyAccountCredentials('usr-tenzing-nepal');
+    const officer219Acct = getTestOnlyAccountCredentials('usr-reviewer-219');
+    const officer104Acct = getTestOnlyAccountCredentials('usr-reviewer-104');
 
     const adventurerSession = authenticateUserSession({
       usernameOrUserId: advAcct.username,
-      password: advAcct.defaultPassword,
+      password: advAcct.ephemeralPassword,
     });
     const officer219Session = authenticateUserSession({
       usernameOrUserId: officer219Acct.username,
-      password: officer219Acct.defaultPassword,
+      password: officer219Acct.ephemeralPassword,
       totpCode: generateTotpCode(officer219Acct.mfaSecretHex),
     });
     const officer104Session = authenticateUserSession({
       usernameOrUserId: officer104Acct.username,
-      password: officer104Acct.defaultPassword,
+      password: officer104Acct.ephemeralPassword,
       totpCode: generateTotpCode(officer104Acct.mfaSecretHex),
     });
 
@@ -714,12 +710,12 @@ describe('SEC-EVID-001: GPX/EXIF/PDF Parser Security, XXE Rejection, Duplicate S
     expect(exif.captureTimestampUtc).toBe('2026-11-04T06:32:10Z');
 
     // Login as Registered Adventurer
-    const advAcct = TEST_ACCOUNTS_CREDENTIAL_INFO['usr-tenzing-nepal'];
+    const advAcct = getTestOnlyAccountCredentials('usr-tenzing-nepal');
     const loginRes = await apiFetch('/api/v1/auth/login', {
       method: 'POST',
       body: {
         username: advAcct.username,
-        password: advAcct.defaultPassword,
+        password: advAcct.ephemeralPassword,
       },
     });
     const token = loginRes.body.sessionToken;
@@ -799,10 +795,10 @@ describe('SEC-PRIV-001: AES-256-GCM PII Vault, Key-Shredding Erasure & Coordinat
     expect(decryptedAfter).toBeNull();
 
     // Execute full database key-shredding erasure for usr-pasangnya-01 via Founder/Compliance
-    const founderAcct = TEST_ACCOUNTS_CREDENTIAL_INFO['usr-gov-founder-001'];
+    const founderAcct = getTestOnlyAccountCredentials('usr-gov-founder-001');
     const founderSession = authenticateUserSession({
       usernameOrUserId: founderAcct.username,
-      password: founderAcct.defaultPassword,
+      password: founderAcct.ephemeralPassword,
       totpCode: generateTotpCode(founderAcct.mfaSecretHex),
     });
 
@@ -833,7 +829,7 @@ describe('SEC-PRIV-001: AES-256-GCM PII Vault, Key-Shredding Erasure & Coordinat
       { lat: 27.7002, lon: 85.3001, ele: 1405 }, // end
     ];
     const masked = maskResidentialTrackpoints(pts, 2000);
-    expect(masked.removedCount).toBe(2);
+    expect(masked.removedCount).toBe(3);
     expect(masked.residentialStartEndMasked).toBe(true);
     expect(masked.maskedPoints.some((p) => p.ele === 8848.86)).toBe(true);
   });

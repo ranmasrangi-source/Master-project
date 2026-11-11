@@ -56,28 +56,17 @@ type ActiveSection =
   | 'CERTIFICATES_STANDINGS'
   | 'GOVERNANCE_PHASES';
 
-interface TestAccountDirectoryEntry {
-  userId: string;
-  username: string;
-  role: UserRole;
-  displayName: string;
-  officerCode: string;
-  defaultPasswordHint: string;
-  currentTotpCode: string | null;
-}
-
 export default function App() {
   // Navigation & Global Workspace Preferences
   const [activeSection, setActiveSection] = useState<ActiveSection>('DESTINATIONS');
   const [lang, setLang] = useState<'EN' | 'NE'>('EN');
   const [unitSystem, setUnitSystem] = useState<'METRIC' | 'IMPERIAL'>('METRIC');
 
-  // Authenticated Server Session State (SEC-AUTH-001: Zero client-side role switching)
+  // Authenticated Server Session State (SEC-AUTH-001 & BUG-P0-001: Zero client-side credential/MFA disclosure)
   const [sessionToken, setSessionToken] = useState<string>('');
   const [sessionUser, setSessionUser] = useState<AuthenticatedSessionUser | null>(null);
-  const [accountsDirectory, setAccountsDirectory] = useState<TestAccountDirectoryEntry[]>([]);
-  const [loginUsername, setLoginUsername] = useState<string>('pemba.verifier');
-  const [loginPassword, setLoginPassword] = useState<string>('Verifier#8848!Dept219');
+  const [loginUsername, setLoginUsername] = useState<string>('');
+  const [loginPassword, setLoginPassword] = useState<string>('');
   const [loginTotp, setLoginTotp] = useState<string>('');
   const [authLoading, setAuthLoading] = useState<boolean>(false);
 
@@ -168,14 +157,11 @@ export default function App() {
       const tok = tokenOverride !== undefined ? tokenOverride : sessionToken;
       if (tok) headers.Authorization = `Bearer ${tok}`;
 
-      const [bootRes, acctRes] = await Promise.all([
-        fetch('/api/v1/bootstrap', { headers }),
-        fetch('/api/v1/auth/accounts'),
-      ]);
+      const bootRes = await fetch('/api/v1/bootstrap', { headers });
       if (bootRes.ok) {
         const data = await bootRes.json();
         if (Array.isArray(data.destinations)) setDestinations(data.destinations);
-        if (Array.isArray(data.submissions) && data.submissions.length > 0) {
+        if (Array.isArray(data.submissions)) {
           setSubmissions(data.submissions);
         }
         if (Array.isArray(data.certificates)) setCertificates(data.certificates);
@@ -186,15 +172,7 @@ export default function App() {
         if (Array.isArray(data.dualControlApprovals)) {
           setDualControlApprovals(data.dualControlApprovals);
         }
-        if (data.sessionUser) {
-          setSessionUser(data.sessionUser);
-        }
-      }
-      if (acctRes.ok) {
-        const acctData = await acctRes.json();
-        if (Array.isArray(acctData.accounts)) {
-          setAccountsDirectory(acctData.accounts);
-        }
+        setSessionUser(data.sessionUser || null);
       }
     } catch {
       // Fallback to initial state if offline
@@ -292,14 +270,6 @@ export default function App() {
     }
   };
 
-  const handleSelectDirectoryAccount = (username: string) => {
-    const found = accountsDirectory.find((a) => a.username === username);
-    if (!found) return;
-    setLoginUsername(found.username);
-    setLoginPassword(found.defaultPasswordHint);
-    setLoginTotp(found.currentTotpCode || '');
-  };
-
   // Format elevation helper
   const formatElev = (m: number) => {
     if (unitSystem === 'METRIC') {
@@ -358,7 +328,10 @@ export default function App() {
   );
 
   const selectedSubmission = useMemo(
-    () => submissions.find((s) => s.id === selectedSubmissionId) || submissions[0],
+    () =>
+      submissions.find((s) => s.id === selectedSubmissionId) ||
+      submissions[0] ||
+      INITIAL_SUBMISSIONS_QUEUE[0],
     [submissions, selectedSubmissionId]
   );
 
@@ -540,13 +513,13 @@ export default function App() {
         });
         return;
       }
-      if (data.newlyIssuedCertificate) {
-        setVerifyLookupId(data.newlyIssuedCertificate.verificationId);
+      if (data.issuedCertificate) {
+        setVerifyLookupId(data.issuedCertificate.verificationId);
       }
       setWorkstationBanner({
         type: 'SUCCESS',
-        text: data.newlyIssuedCertificate
-          ? `Human Verification Complete (${data.submission.status}): Free 3D Badge & 128-bit CSPRNG Certificate (${data.newlyIssuedCertificate.verificationId}) issued.`
+        text: data.issuedCertificate
+          ? `Human Verification Complete (${data.submission.status}): Free 3D Badge & 128-bit CSPRNG Certificate (${data.issuedCertificate.verificationId}) issued.`
           : `Server recorded ${decisionType}. Submission status is now ${data.submission.status}.`,
       });
     } catch {
@@ -979,24 +952,21 @@ export default function App() {
               </div>
             ) : (
               <form onSubmit={handleServerLogin} className="flex flex-wrap items-center gap-2">
-                <select
+                <input
+                  type="text"
                   value={loginUsername}
-                  onChange={(e) => handleSelectDirectoryAccount(e.target.value)}
-                  className="bg-[#18181B] text-white border border-[#C9A86A]/40 rounded px-2 py-1 text-xs"
-                  aria-label="Select test account"
-                >
-                  {accountsDirectory.map((acc) => (
-                    <option key={acc.userId} value={acc.username}>
-                      {acc.displayName} [{acc.role}]{' '}
-                      {acc.currentTotpCode ? `(TOTP: ${acc.currentTotpCode})` : ''}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(e) => setLoginUsername(e.target.value)}
+                  placeholder="Username"
+                  autoComplete="username"
+                  aria-label="Username"
+                  className="w-36 bg-[#18181B] text-white border border-[#C9A86A]/40 rounded px-2 py-1 text-xs"
+                />
                 <input
                   type="password"
                   value={loginPassword}
                   onChange={(e) => setLoginPassword(e.target.value)}
                   placeholder="Password"
+                  autoComplete="current-password"
                   className="w-28 bg-[#18181B] text-white border border-white/15 rounded px-2 py-1 text-xs"
                 />
                 <input

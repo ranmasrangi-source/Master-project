@@ -140,6 +140,9 @@ export interface EvidenceArtifact {
     residentialStartEndMasked: boolean;
     permitReferenceCode?: string;
     barometricChannelDetected?: boolean;
+    gpsTimestampConsistent?: boolean;
+    spoofingIndicators?: string[];
+    exifTamperingIndicator?: boolean;
   };
 }
 
